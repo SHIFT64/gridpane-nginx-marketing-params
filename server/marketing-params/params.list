@@ -15,7 +15,8 @@
 #                       ~* = case-insensitive, ~ = case-sensitive
 #
 # File: /etc/nginx/marketing-params/params.list
-# After editing:  nginx -t && systemctl reload nginx     (or: gp ngx reload)
+# After editing:  ./install.sh --apply-list   (from the repo dir: nginx -t + reload,
+#                 restores the last good list if the test fails)
 # #
 
 # --- Google Analytics / Ads / Merchant Center

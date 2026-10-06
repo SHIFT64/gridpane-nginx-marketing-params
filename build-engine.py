@@ -38,6 +38,7 @@ HEADER = r'''# #
 # #
 
 # Declared here so php-context.conf can always reference/set them.
+map "" $gp_mkt_fcgi   { default ""; }   # set to 1 by the FastCGI-only site flag file
 map "" $gp_mkt_in     { default ""; }
 map "" $gp_mkt_unskip { default ""; }
 map "" $gp_mkt_sc     { default ""; }
@@ -96,13 +97,14 @@ map $gp_mkt_j1 $gp_mkt_allmkt {
 
 # ---- decision, evaluated in the php location (after every server-level skip
 # rule and every rewrite). php-context.conf sets
-#   $gp_mkt_in = "$skip_reason|$request_method|$gp_mkt_qs#$args"
-# Un-skip only if: GridPane's ONLY skip reason is the query string, GET/HEAD,
-# $args are still the original query ('#' never occurs in $args), and every
-# param is on the list.
+#   $gp_mkt_in = "$gp_mkt_fcgi|$skip_reason|$request_method|$gp_mkt_qs#$args"
+# Un-skip only if: the vhost is a GridPane FastCGI-cache vhost (flag set by the
+# site's *skip-fcgi-cache-context.conf, which only the FastCGI template includes),
+# GridPane's ONLY skip reason is the query string, GET/HEAD, $args are still the
+# original query ('#' never occurs in $args), and every param is on the list.
 map $gp_mkt_in $gp_mkt_verdict {
     volatile;
-    "~^-query_string\|(?:GET|HEAD)\|(?<gpmkt_q>[^#]*+)#\k<gpmkt_q>$"  $gp_mkt_allmkt;
+    "~^1\|-query_string\|(?:GET|HEAD)\|(?<gpmkt_q>[^#]*+)#\k<gpmkt_q>$"  $gp_mkt_allmkt;
     default  "";
 }
 
@@ -150,13 +152,15 @@ map $host $gp_mkt_bare_host {
     "~^www\.(?<gpmkt_bh>.+)$"  $gpmkt_bh;
     default                    $host;
 }
-map "$gp_mkt_unskip|$gp_mkt_bare_host|$upstream_http_location" $gp_mkt_location {
+# $sent_http_location = the Location being sent: PHP's (upstream) or one created
+# by nginx itself (e.g. `return 301` in a php-context include).
+map "$gp_mkt_unskip|$gp_mkt_bare_host|$sent_http_location" $gp_mkt_location {
     volatile;
     # no query in Location yet
     "~*^1\|(?<gpmkt_h>[^|]*)\|(?<gpmkt_l>(?:https?://(?:www\.)?\k<gpmkt_h>(?::[0-9]+)?(?=[/#]|$)|/(?![/\x5c\t]))[^?#]*)(?<gpmkt_f>#.*)?$"  "$gpmkt_l?$gp_mkt_qs$gpmkt_f";
     # Location already has a query
     "~*^1\|(?<gpmkt_h>[^|]*)\|(?<gpmkt_l>(?:https?://(?:www\.)?\k<gpmkt_h>(?::[0-9]+)?(?=[/?#]|$)|/(?![/\x5c\t]))[^#]*)(?<gpmkt_f>#.*)?$"   "$gpmkt_l&$gp_mkt_qs$gpmkt_f";
-    default  $upstream_http_location;
+    default  $sent_http_location;
 }
 '''
 

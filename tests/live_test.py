@@ -6,7 +6,7 @@ Live smoke test of an installed site, run ON the GridPane server.
   ./test.sh live example.com /about/    test a specific page (best: a normal page with a
                                         trailing slash -> the redirect check runs too)
 
-Talks to the local nginx (127.0.0.1:443, SNI = the site), so Cloudflare is not involved.
+Talks to the local nginx (127.0.0.1:443, SNI = the site), so no proxy/CDN in front is involved.
 Only GET requests; it purges nothing. The first request may create the normal cache entry
 of the page (exactly what a visitor would do).
 """
@@ -82,8 +82,9 @@ def main():
     print(c("1", "Installation"))
     eng = os.path.exists("/etc/nginx/marketing-params/engine.conf")
     T.check("engine installed (/etc/nginx/marketing-params/)", eng)
-    sw = os.path.exists("/var/www/%s/nginx/marketing-params-php-context.conf" % a.site)
-    T.check("site switch present (/var/www/%s/nginx/marketing-params-php-context.conf)" % a.site, sw)
+    for f in ("marketing-params-php-context.conf", "marketing-params-skip-fcgi-cache-context.conf"):
+        T.check("site file present (/var/www/%s/nginx/%s)" % (a.site, f),
+                os.path.exists("/var/www/%s/nginx/%s" % (a.site, f)))
 
     print(c("1", "\nCache behaviour on https://%s%s" % (a.site, path)))
     sep = "&" if "?" in path else "?"

@@ -38,6 +38,7 @@ MAX_PARAMS, MAX_LEN = 24, 2048
 LIVE_DIR = "/etc/nginx/marketing-params"
 HOST = "test.example"
 OFF_HOST = "off.example"
+NOFLAG_HOST = "noflag.example"
 
 COLOR = sys.stdout.isatty()
 
@@ -156,8 +157,14 @@ class Sandbox:
         write(os.path.join(mp, "php-context.orig.conf"), read(os.path.join(mp, "php-context.conf")))
         write(self.p("stub-http.conf"), self.relocate(read(os.path.join(REPO, "server/stubs/conf.d-marketing-params.conf"))))
         os.makedirs(self.p("extra.d"), exist_ok=True)
-        write(self.p("site", "marketing-params-php-context.conf"),
+        for f in ("marketing-params-php-context.conf", "marketing-params-skip-fcgi-cache-context.conf"):
+            write(self.p("site", f), self.relocate(read(os.path.join(REPO, "site", f))))
+        # same switch but WITHOUT the FastCGI flag (what a Redis/no-cache vhost would see)
+        write(self.p("site-noflag", "marketing-params-php-context.conf"),
               self.relocate(read(os.path.join(REPO, "site", "marketing-params-php-context.conf"))))
+        # an nginx-generated redirect inside the php location (GridPane KB style php-context rule)
+        write(self.p("site", "custom-redirect-php-context.conf"),
+              'if ($request_uri ~ "^/ngx-redirect\\.php") {\n    return 301 /nginx-target/;\n}\n')
         # a site's own customisations that must keep working (and win):
         write(self.p("site", "custom-root-context.conf"),
               "rewrite ^/rw/$ /index.php?lang=en last;\n"
@@ -174,6 +181,7 @@ class Sandbox:
         os.makedirs(self.p("cache"), exist_ok=True)
         self.wpfc(self.p("site"), "wpfc.conf")
         self.wpfc(self.p("site-off"), "wpfc-off.conf")
+        self.wpfc(self.p("site-noflag"), "wpfc-noflag.conf")
         write(self.p("nginx.conf"), self.nginx_conf())
         if os.geteuid() == 0:
             subprocess.run(["chown", "-R", "www-data:www-data", self.p("cache"), self.p("tmp")], check=False)
@@ -211,7 +219,15 @@ class Sandbox:
         set $sockfile php;
         include %(d)s/site-off/*-main-context.conf;
         include %(d)s/wpfc-off.conf;
-    }""" % dict(port=self.port, off=OFF_HOST, d=self.d))
+    }
+    server {
+        listen 127.0.0.1:%(port)d;
+        server_name %(noflag)s;
+        root %(d)s/htdocs;
+        index index.php;
+        set $sockfile php;
+        include %(d)s/wpfc-noflag.conf;
+    }""" % dict(port=self.port, off=OFF_HOST, noflag=NOFLAG_HOST, d=self.d))
         else:
             servers.append("""
     server {
@@ -504,6 +520,10 @@ def run_matrix(R):
             h, _ = get("/loc/%s/%s" % (kind, q))
             R.check("non-marketing request: Location %s stays exactly %r (not made absolute)" % (kind + q, want),
                     h.get("location") == want, "got %r" % h.get("location"))
+    for q in ("", "?gclid=1", "?page=2"):
+        h, _ = get("/ngx-redirect.php" + q)
+        R.check("nginx's own `return 301` in the php location keeps its Location (%s)" % (q or "no query"),
+                h[":status"] == 301 and (h.get("location") or "").startswith("/nginx-target/"), summary(h))
     h, _ = get("/noslash?" + Q)
     R.check("WordPress trailing-slash 301 keeps params",
             h.get("location") == "https://%s/noslash/?%s" % (HOST, Q), summary(h))
@@ -533,6 +553,9 @@ def run_matrix(R):
     t = "/a/?gclid=1"
     h, _ = get(t, host=OFF_HOST)
     R.check("off.example %s -> BYPASS -query_string, PHP sees original" % t, is_stock_bypass(h, t), summary(h))
+    h, _ = get(t, host=NOFLAG_HOST)
+    R.check("php switch WITHOUT the FastCGI flag (e.g. site moved to Redis cache) -> stock, inert",
+            is_stock_bypass(h, t), summary(h))
     st, h, _ = R.req("/noslash?gclid=1", host=OFF_HOST)
     R.check("off.example redirect untouched", h.get("location") == "https://%s/noslash/?gclid=1" % OFF_HOST,
             "loc=%r" % h.get("location"))
@@ -545,8 +568,8 @@ def run_config_scenarios(R, sbx):
     # GridPane clone to a server WITHOUT the engine: only the per-site switch exists
     absent = sbx.p("site-clone")
     os.makedirs(absent, exist_ok=True)
-    write(os.path.join(absent, "marketing-params-php-context.conf"),
-          read(os.path.join(REPO, "site", "marketing-params-php-context.conf")).replace(LIVE_DIR, sbx.p("not-installed")))
+    for f in ("marketing-params-php-context.conf", "marketing-params-skip-fcgi-cache-context.conf"):
+        write(os.path.join(absent, f), read(os.path.join(REPO, "site", f)).replace(LIVE_DIR, sbx.p("not-installed")))
     conf = sbx.nginx_conf(engine=False, switches_dir=absent, off_server=False)
     conf = conf.replace("include %s/wpfc.conf;" % sbx.d, "include %s/wpfc-clone.conf;" % sbx.d)
     write(sbx.p("wpfc-clone.conf"), read(sbx.p("wpfc.conf")).replace(sbx.p("site") + "/", absent + "/"))

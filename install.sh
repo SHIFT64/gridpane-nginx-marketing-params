@@ -4,6 +4,8 @@
 #   ./install.sh                      install / update the server-wide engine (your list is kept)
 #   ./install.sh site.com [site2...]  ...and switch it ON for the given site(s)
 #   ./install.sh --disable site.com   switch it OFF for a site
+#   ./install.sh --apply-list         after editing params.list: nginx -t + reload, or restore
+#                                     the last good list if the test fails
 #   ./install.sh --uninstall          remove everything (all sites + engine)
 #   ./install.sh --status             show what is installed / enabled / suspicious
 #
@@ -17,7 +19,8 @@ set -Eeuo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DIR=/etc/nginx/marketing-params
 STUB_HTTP=/etc/nginx/conf.d/marketing-params.conf
-SWITCH=marketing-params-php-context.conf
+SWITCH=marketing-params-php-context.conf              # php location logic
+FLAG=marketing-params-skip-fcgi-cache-context.conf    # "this vhost is FastCGI-cached" flag
 # files of the round-1 layout, removed on update
 OLD_FILES=(/etc/nginx/extra.d/00-marketing-params-skip-fcgi-cache-context.conf "$DIR/skip-context.conf")
 OLD_SWITCH=marketing-params-main-context.conf
@@ -56,6 +59,7 @@ reload() {
     if grep -q '\[warn\]' <<<"$out"; then echo "nginx -t warnings:"; grep '\[warn\]' <<<"$out"; fi
     systemctl reload nginx
     echo "nginx -t OK, nginx reloaded"
+    if [[ -e "$DIR/params.list" ]]; then cp -a "$DIR/params.list" "$DIR/params.list.last-good"; fi
     cleanup
   else
     echo "$out" >&2
@@ -105,6 +109,7 @@ enable_site() {
     echo "   (this tool overrides the key with the stock formula: $STOCK_KEY)" >&2
     return 0
   fi
+  put "$HERE/site/$FLAG" "$d/$FLAG" 644
   put "$HERE/site/$SWITCH" "$d/$SWITCH" 644
   echo "ON  for $s"
 }
@@ -121,10 +126,11 @@ status() {
     [[ -e "$f" ]] && { echo "  OLD LAYOUT LEFTOVER: $f (run ./install.sh to clean up)"; ok=0; }
   done
   echo "sites ON (incl. clones/staging that copied the switch):"
-  for f in /var/www/*/nginx/$SWITCH; do
-    [[ -e "$f" ]] || continue
-    s="$(basename "$(dirname "$(dirname "$f")")")"
-    if ! is_fcgi_site "$s"; then echo "  $s   !! switch present but site has no FastCGI cache (inactive)";
+  for d in /var/www/*/nginx; do
+    [[ -e "$d/$SWITCH" || -e "$d/$FLAG" ]] || continue
+    s="$(basename "$(dirname "$d")")"
+    if [[ ! -e "$d/$SWITCH" || ! -e "$d/$FLAG" ]]; then echo "  $s   !! only one of $SWITCH / $FLAG present (inactive) - re-run ./install.sh $s or --disable it";
+    elif ! is_fcgi_site "$s"; then echo "  $s   !! switch present but site has no FastCGI cache (inactive)";
     elif ! site_key_ok "$s"; then echo "  $s   !! customised cache key / Lua query-param cache - disable it"; ok=0;
     else echo "  $s"; fi
   done
@@ -133,17 +139,35 @@ status() {
 
 case "${1:-}" in
   --status) status; exit $? ;;
-  -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+  -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+  --apply-list)
+    if out="$(nginx -t 2>&1)"; then
+      systemctl reload nginx
+      cp -a "$DIR/params.list" "$DIR/params.list.last-good"
+      echo "nginx -t OK, list applied ($(grep -cE '^[^#[:space:]].*;' "$DIR/params.list") entries)"
+    else
+      echo "$out" >&2
+      if [[ -e "$DIR/params.list.last-good" ]]; then
+        mv "$DIR/params.list" "$DIR/params.list.rejected"
+        cp -a "$DIR/params.list.last-good" "$DIR/params.list"
+        echo "!! nginx -t failed: restored the last good list; your edit is in $DIR/params.list.rejected" >&2
+        nginx -t >/dev/null 2>&1 && echo "nginx -t OK again (nothing was reloaded)" >&2
+      else
+        echo "!! nginx -t failed and no last good list exists - fix $DIR/params.list" >&2
+      fi
+      exit 1
+    fi
+    ;;
   --disable)
     shift; [[ $# -gt 0 ]] || { echo "usage: $0 --disable site.com" >&2; exit 1; }
     trap 'rollback "unexpected error"' ERR
-    for s in "$@"; do del "/var/www/$s/nginx/$SWITCH"; echo "OFF for $s"; done
+    for s in "$@"; do del "/var/www/$s/nginx/$SWITCH"; del "/var/www/$s/nginx/$FLAG"; echo "OFF for $s"; done
     reload
     echo "Tip: purge the site's cache afterwards (GridPane UI or Nginx Helper)."
     ;;
   --uninstall)
     trap 'rollback "unexpected error"' ERR
-    for f in /var/www/*/nginx/$SWITCH /var/www/*/nginx/$OLD_SWITCH "${OLD_FILES[@]}" "$STUB_HTTP"; do del "$f"; done
+    for f in /var/www/*/nginx/$SWITCH /var/www/*/nginx/$FLAG /var/www/*/nginx/$OLD_SWITCH "${OLD_FILES[@]}" "$STUB_HTTP"; do del "$f"; done
     reload
     if [[ -e "$DIR/params.list" ]]; then
       cp -a "$DIR/params.list" /root/marketing-params.list.bak
@@ -152,7 +176,7 @@ case "${1:-}" in
     rm -rf "$DIR"
     echo "uninstalled"
     ;;
-  -*) echo "unknown option $1" >&2; sed -n '2,15p' "$0"; exit 1 ;;
+  -*) echo "unknown option $1" >&2; sed -n '2,17p' "$0"; exit 1 ;;
   *)
     BACKUP_TMP="$(mktemp -d)"; trap 'rm -rf "$BACKUP_TMP"' EXIT
     trap 'rollback "unexpected error"' ERR
