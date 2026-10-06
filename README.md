@@ -37,7 +37,7 @@ The script:
 
 ```bash
 ./install.sh site1.com site2.com          # several sites
-./install.sh --status                     # what is installed / enabled / suspicious
+./install.sh --status                     # health check: files + checksums, running config, GridPane template hooks, nginx -t
 ./install.sh --disable yoursite.com       # switch off for a site
 ./install.sh --apply-list                 # after editing the list (see below)
 ./install.sh --uninstall                  # remove everything (list saved to /root/marketing-params.list.bak)
@@ -141,7 +141,10 @@ request /about-us/?gclid=1&utm_source=x
 
 ### Robustness
 
-- **GridPane's files are not edited.** Custom-named files survive the nightly sync and `gp update`.
+- **What GridPane leaves alone, and what it doesn't** (from an audit of GridPane's scripts, gp-cli 1.2.1518 / configs 1.2.90, 2026-10-07):
+  - **Kept:** the nightly jobs, `gp update` (including force runs), per-site config regeneration and gridpane-nginx package upgrades never delete or rewrite these custom-named files. They only reset permissions: 640 under `/etc/nginx`, and root:root 644 in the site's `nginx/` dir, where symlinks are deleted, so the switch files must stay regular files. GridPane's update also strips every line containing certain directive names from custom files; `install.sh` refuses to ship such a line.
+  - **Removed or replaced:** the per-site files go away when the site is deleted, when it is fully restored from a backup (they return to whatever the backup held), or when another server's site is cloned or migrated into it. A Migrately move does not carry the server-wide engine.
+  - **Not under our control:** GridPane can change its own template on any update. Run `./install.sh --status` after GridPane updates (it checks file checksums, the running config, the template hooks and `nginx -t`), and re-run `./install.sh <site>` after a restore or clone.
 - **Clone to a server without the engine.** GridPane only copies `/var/www/<site>/nginx/`, and the include uses an exact-name glob. On such a server nothing happens and `nginx -t` passes.
 - **Site switched to Redis or no cache.** The switch stays inert because the FastCGI flag file is only included by GridPane's FastCGI template.
 - **No dependency on GridPane's variables.** The engine never references them and the switch declares them itself, so changing a site's cache type in the GridPane UI cannot break `nginx -t`.
@@ -154,7 +157,7 @@ request /about-us/?gclid=1&utm_source=x
 - **Skip rules without a reason.** A rule that sets `$skip_cache 1` **without** setting or appending `$skip_reason` is overridden for marketing-only URLs. Always give a reason: `set $skip_reason "${skip_reason}-my_reason";`.
 - **The cache key is forced to the stock formula.** On an enabled site, the switch sets `fastcgi_cache_key` to `$scheme$request_method$host$request_uri` for **every** request, so `install.sh` refuses sites with a different key formula. The solution also relies on GridPane's literal `-query_string` reason, so re-run `./test.sh` after GridPane updates.
 - **Redirects to other hosts.** Parameters are re-appended only to a `Location` on the same host (or its www/apex twin) or to a `/…` path. A PHP redirect to another domain (alias → primary, S3, payment gateways, an affiliate link that passes the query on) gets nothing appended, so the params are lost there. A same-host redirect that drops the query gets them back. If the target already has its own `utm_*`, the parameters end up duplicated. nginx's own redirects inside the PHP location are sent with a relative `Location` (valid HTTP).
-- **Limits.** Defaults are 24 params (empty `&&` segments don't count), 2048 bytes of query and 8 KB of path. Beyond that you get stock BYPASS. Each param of the limit costs 4 nginx variables (GridPane uses `variables_hash_max_size 2048`), so don't raise it without need.
+- **Limits.** Defaults are 24 params (empty `&&` segments don't count), 2048 bytes of query and 8 KB of path. Beyond that you get stock BYPASS. Each param of the limit costs 4 nginx variables and GridPane's variables hash limit (2048, set in `common/basics.conf`) is shared by the whole server, so don't raise it without need.
 - **Matching.** Names are matched raw (undecoded) and case-insensitively. `utm%5Fsource` is a BYPASS (safe). `UTM_SOURCE` shares the cache entry, although PHP treats it as a different name.
 - **Clones and staging on the same server.** GridPane copies the switch, so the copy is enabled straight away. Pushing staging to production re-enables the feature on a production site where it was disabled. `./install.sh --status` lists every site that has the switch.
 - **`Set-Cookie` in the cache.** Stock GridPane caches responses together with `Set-Cookie`. PHP never sees the marketing values, so no cookie can be built from them.

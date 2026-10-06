@@ -60,6 +60,7 @@ reload() {
     systemctl reload nginx
     echo "nginx -t OK, nginx reloaded"
     if [[ -e "$DIR/params.list" ]]; then cp -a "$DIR/params.list" "$DIR/params.list.last-good"; fi
+    if [[ -e "$DIR/engine.conf" ]]; then write_manifest; fi
     cleanup
   else
     echo "$out" >&2
@@ -68,6 +69,23 @@ reload() {
 }
 
 is_fcgi_site() { grep -qs -- "-wpfc.conf" "/etc/nginx/sites-available/$1"; }
+
+# GridPane's gpupdate deletes every line containing a "baseline" directive name
+# (today: the variables hash size) from all files under /etc/nginx and /var/www/*/nginx
+# (gridpane::check_nginx_baseline_directive::safety). Never ship such a token.
+baseline_guard() {
+  local tokens f
+  tokens="$(sed -nE 's/^[[:space:]]*([a-z_0-9]+)[[:space:]].*;.*/\1/p' /etc/nginx/common/basics.conf 2>/dev/null | sort -u)"
+  [[ -n "$tokens" ]] || return 0
+  for f in "$@"; do
+    if grep -qwFf <(echo "$tokens") "$f"; then
+      echo "!! $f contains a directive name GridPane strips from custom files ($(grep -owFf <(echo "$tokens") "$f" | sort -u | tr '\n' ' '))" >&2
+      return 1
+    fi
+  done
+}
+MANIFEST="$DIR/.manifest.sha256"
+write_manifest() { (cd "$DIR" && sha256sum engine.conf php-context.conf README.md limits.env > "$MANIFEST" && chmod 640 "$MANIFEST"); }
 site_key_ok() {                  # the override assumes GridPane's stock cache key
   local var="/etc/nginx/common/$1-fcgi-cache-var.conf" wpfc="/etc/nginx/common/$1-wpfc.conf"
   [[ -e "/etc/nginx/common/_custom/$1-fcgi-cache-var.conf" ]] && var="/etc/nginx/common/_custom/$1-fcgi-cache-var.conf"
@@ -82,10 +100,13 @@ install_engine() {
   mkdir -p "$DIR"
   python3 "$HERE/build-engine.py" "$mp" "$ml" > "$BACKUP_TMP/engine.conf"
   printf 'MAX_PARAMS=%s\nMAX_LEN=%s\n' "$mp" "$ml" > "$BACKUP_TMP/limits.env"
+  baseline_guard "$BACKUP_TMP/engine.conf" "$HERE/server/marketing-params/php-context.conf" "$HERE/README.md" \
+    "$HERE/server/marketing-params/params.list" "$HERE/server/stubs/conf.d-marketing-params.conf" \
+    "$HERE/site/$SWITCH" "$HERE/site/$FLAG" || rollback "refusing to install"
   put "$BACKUP_TMP/engine.conf" "$DIR/engine.conf" 640
   put "$BACKUP_TMP/limits.env" "$DIR/limits.env" 640
   put "$HERE/server/marketing-params/php-context.conf" "$DIR/php-context.conf" 640
-  put "$HERE/README.md" "$DIR/README.md" 644
+  put "$HERE/README.md" "$DIR/README.md" 640
   if [[ -e "$DIR/params.list" ]]; then
     echo "kept existing $DIR/params.list (your edits are preserved)"
   else
@@ -115,13 +136,25 @@ enable_site() {
 }
 
 status() {
-  local ok=1 f s
+  local ok=1 f s d r bad
   echo "engine dir:   $DIR"
   for f in "$STUB_HTTP" "$DIR/engine.conf" "$DIR/php-context.conf" "$DIR/params.list"; do
     if [[ -e "$f" ]]; then echo "  ok      $f"; else echo "  MISSING $f"; ok=0; fi
   done
   [[ -e "$DIR/limits.env" ]] && echo "  limits: $(tr '\n' ' ' < "$DIR/limits.env")"
   echo "  list:   $(grep -cE '^[^#[:space:]].*;' "$DIR/params.list" 2>/dev/null || echo 0) entries"
+  if [[ -e "$MANIFEST" ]]; then
+    bad="$(cd "$DIR" && sha256sum -c --quiet "$MANIFEST" 2>/dev/null | cut -d: -f1 | tr '\n' ' ')" || true
+    if [[ -n "$bad" ]]; then echo "  !! changed since install: $bad(re-run ./install.sh)"; ok=0; else echo "  ok      files unchanged since install"; fi
+  fi
+  if ! baseline_guard "$DIR"/engine.conf "$DIR"/php-context.conf "$DIR"/params.list "$DIR"/README.md 2>/dev/null; then
+    echo "  !! an installed file contains a directive name GridPane strips (re-run ./install.sh)"; ok=0
+  fi
+  if ! grep -qE '^[[:space:]]*include /etc/nginx/conf\.d/\*\.conf;' /etc/nginx/nginx.conf; then
+    echo "  !! nginx.conf no longer includes conf.d/*.conf - the engine is not loaded"; ok=0
+  elif [[ "$(nginx -T 2>/dev/null | grep -c '^# configuration file /etc/nginx/marketing-params/engine.conf')" -eq 0 ]]; then
+    echo "  !! engine.conf is not part of the running config (nginx -T)"; ok=0
+  fi
   for f in "${OLD_FILES[@]}" /var/www/*/nginx/$OLD_SWITCH; do
     [[ -e "$f" ]] && { echo "  OLD LAYOUT LEFTOVER: $f (run ./install.sh to clean up)"; ok=0; }
   done
@@ -129,11 +162,21 @@ status() {
   for d in /var/www/*/nginx; do
     [[ -e "$d/$SWITCH" || -e "$d/$FLAG" ]] || continue
     s="$(basename "$(dirname "$d")")"
-    if [[ ! -e "$d/$SWITCH" || ! -e "$d/$FLAG" ]]; then echo "  $s   !! only one of $SWITCH / $FLAG present (inactive) - re-run ./install.sh $s or --disable it";
-    elif ! is_fcgi_site "$s"; then echo "  $s   !! switch present but site has no FastCGI cache (inactive)";
-    elif ! site_key_ok "$s"; then echo "  $s   !! customised cache key / Lua query-param cache - disable it"; ok=0;
-    else echo "  $s"; fi
+    r="/etc/nginx/common/$s-wpfc.conf"
+    if [[ ! -e "$d/$SWITCH" || ! -e "$d/$FLAG" ]]; then echo "  $s   !! only one of $SWITCH / $FLAG present (inactive) - re-run ./install.sh $s or --disable it"; continue; fi
+    if [[ -L "$d/$SWITCH" || -L "$d/$FLAG" ]]; then echo "  $s   !! switch files must be regular files (GridPane deletes symlinks there)"; ok=0; continue; fi
+    if ! is_fcgi_site "$s"; then echo "  $s   (switch present, but the site has no FastCGI cache: inactive)"; continue; fi
+    if ! site_key_ok "$s"; then echo "  $s   !! customised cache key / Lua query-param cache - disable it"; ok=0; continue; fi
+    if [[ -e /etc/nginx/common/_custom/wpfc.conf || -e "/etc/nginx/common/_custom/$s-wpfc.conf" ]]; then
+      echo "  $s   !! a common/_custom wpfc override exists - check that the hooks below are still there"; fi
+    if ! grep -qF 'if ($query_string != "")' "$r" || ! grep -qF -- '-query_string"' "$r" \
+       || ! grep -qF "include /var/www/$s/nginx/*-php-context.conf;" "$r" \
+       || ! grep -qF "include /var/www/$s/nginx/*skip-fcgi-cache-context.conf;" "$r"; then
+      echo "  $s   !! GridPane's template changed (query-string rule or include hooks missing in $r) - run ./test.sh --site $s"; ok=0; continue
+    fi
+    echo "  $s"
   done
+  if ! nginx -t >/dev/null 2>&1; then echo "  !! nginx -t FAILS"; ok=0; fi
   [[ $ok -eq 1 ]] && echo "status: OK" || { echo "status: PROBLEMS FOUND"; return 1; }
 }
 

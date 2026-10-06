@@ -20,7 +20,7 @@ MAX_PATH = 8192
 
 # Each param adds ~1 level of nested variable evaluation; nginx stops at 100
 # ("cycle while evaluating variable", which fails safe = stock bypass).
-# Each param also registers 4 variables; GridPane's variables_hash_max_size is
+# Each param also registers 4 variables; GridPane's variables hash limit (basics.conf) is
 # 2048, so keep the default low enough to leave headroom for GridPane itself.
 assert 1 <= MAX <= 48, "max_params must be 1..48"
 assert 64 <= MAX_LEN <= 8192, "max_query_len must be 64..8192"
