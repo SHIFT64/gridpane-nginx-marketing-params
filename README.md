@@ -19,15 +19,17 @@ example.com/about-us/
 
 ## Installation
 
-On the GridPane server, as root (the repository is private, so the server needs access to it):
+On the GridPane server, as root:
 
 ```bash
-git clone git@github.com:kayasparrow/gridpane-marketing-params.git /root/gp-marketing-params
+git clone https://github.com/SHIFT64/gridpane-nginx-marketing-params.git /root/gridpane-nginx-marketing-params
 ```
 
 ```bash
-cd /root/gp-marketing-params && ./test.sh && ./install.sh yoursite.com
+cd /root/gridpane-nginx-marketing-params && ./test.sh && ./install.sh yoursite.com
 ```
+
+To update later: `git pull && ./test.sh && ./install.sh` (your list is kept).
 
 The script:
 
