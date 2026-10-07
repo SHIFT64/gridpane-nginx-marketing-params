@@ -82,9 +82,16 @@ def main():
     print(c("1", "Installation"))
     eng = os.path.exists("/etc/nginx/marketing-params/engine.conf")
     T.check("engine installed (/etc/nginx/marketing-params/)", eng)
+    enabled = True
     for f in ("marketing-params-php-context.conf", "marketing-params-skip-fcgi-cache-context.conf"):
-        T.check("site file present (/var/www/%s/nginx/%s)" % (a.site, f),
-                os.path.exists("/var/www/%s/nginx/%s" % (a.site, f)))
+        present = os.path.exists("/var/www/%s/nginx/%s" % (a.site, f))
+        enabled = enabled and present
+        T.check("site file present (/var/www/%s/nginx/%s)" % (a.site, f), present)
+    if not (eng and enabled):
+        print("\n" + c("33", "The site is not enabled, so the cache tests would only show stock GridPane behaviour."))
+        print("Run:  ./install.sh %s   (it prints the reason if it has to skip the site)" % a.site)
+        print("then: ./test.sh live %s %s" % (a.site, path))
+        return 1
 
     print(c("1", "\nCache behaviour on https://%s%s" % (a.site, path)))
     sep = "&" if "?" in path else "?"
