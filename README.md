@@ -172,7 +172,7 @@ GridPane ships an undocumented feature that does something similar: `gp stack ng
 - versions: GridPane nginx 1.30.4, gp-cli 1.2.1518
 - the cookie and redirect cases used small test PHP scripts
 
-GridPane may change its feature, so treat the Lua column as a snapshot of that version.
+GridPane may change its feature, so treat the Lua column as a snapshot of that version. Full findings, evidence and a reproduction script: [docs/gridpane-lua-query-param-cache.md](docs/gridpane-lua-query-param-cache.md).
 
 | | GridPane Lua (hidden) | This repo |
 |---|---|---|
@@ -208,4 +208,5 @@ server/marketing-params/        → /etc/nginx/marketing-params/  (php-context.c
 server/stubs/                   → /etc/nginx/conf.d/marketing-params.conf
 site/                           → /var/www/<site>/nginx/  (switch + FastCGI flag)
 tests/                          sandbox_test.py, live_test.py, fake_php.py (PHP-FPM stand-in)
+docs/                           gridpane-lua-query-param-cache.md (GridPane's Lua feature: how it works, findings)
 ```
