@@ -31,6 +31,8 @@ cd /root/gridpane-nginx-marketing-params && ./test.sh && ./install.sh yoursite.c
 
 To update later: `git pull && ./test.sh && ./install.sh` (your list is kept).
 
+**Update check.** Every install command (`./install.sh [sites]`, `--full`, `--woo-purge`) first asks GitHub for the latest commit of the branch (`git ls-remote`: refs only, nothing is downloaded). If GitHub has a newer one, the script stops before changing anything, runs `git pull --ff-only`, prints the new commits, runs the sandbox test (`./test.sh`) and, only if it passes, starts again with the same arguments. It does not update when the checkout has local changes (it stops and says so), when the local copy is ahead of GitHub, or when GitHub is unreachable (it warns and continues with the local copy). `--status`, `--disable`, `--apply-list` and `--uninstall` never check. Skip the check with `GP_MKT_NO_UPDATE_CHECK=1 ./install.sh …`.
+
 The script:
 
 1. **Once per server:** installs the engine and the list in `/etc/nginx/marketing-params/`, plus a one-line stub in `/etc/nginx/conf.d/`. An existing list is never overwritten.
@@ -48,6 +50,16 @@ MAX_PARAMS=32 MAX_LEN=4096 ./install.sh   # other limits (saved in limits.env)
 ```
 
 Skipped: sites without FastCGI caching (Redis or no cache), and sites with a customised cache key (GeoIP, GridPane's Lua feature).
+
+For WooCommerce shops, also add the [WooCommerce purge add-on](#woocommerce-purge-add-on):
+
+```bash
+./install.sh --full yourshop.com          # engine + switch + add-on, no questions
+./install.sh --woo-purge yourshop.com     # only the add-on
+./install.sh --remove-woo-purge yourshop.com
+```
+
+A plain `./install.sh yourshop.com` run from a terminal asks about the add-on for each WooCommerce site. `./install.sh` without sites (the update after `git pull`) refreshes every installed copy.
 
 ## Tests
 
@@ -87,6 +99,12 @@ Same, using that site's rendered template.
 Give it a page with a trailing `/` so the redirect test runs too.
 
 Exit codes: `0` = all PASS, `1` = at least one FAIL, `2` = setup error (e.g. GridPane changed its template).
+
+```bash
+./test.sh woo yourshop.com
+```
+
+**WooCommerce add-on test.** Runs inside the site's WordPress (`gp wp … eval-file`). It fires the hook the WooCommerce data store fires after a save, for a real product and variation, and checks which URLs reach Nginx Helper's purger. Every outgoing HTTP request is short-circuited and the unlink method is pointed at a missing file, so **nothing is purged and nothing is saved**. Covered: quantity-only change → no purge; stock status / price / scheduled sale → purge; variation → parent; parent categories; one purge per URL per request; drafts; order and order-note exclusions.
 
 ## Parameter list
 
@@ -165,6 +183,37 @@ request /about-us/?gclid=1&utm_source=x
 - **`Set-Cookie` in the cache.** Stock GridPane caches responses together with `Set-Cookie`. PHP never sees the marketing values, so no cookie can be built from them.
 - **Purge has to reach the local nginx** with the same `$scheme` and `$host` as the cache key. If the site's domain points somewhere else (a proxy/CDN) and `/etc/hosts` has no `127.0.0.1` entry for it, Nginx Helper's purge requests never reach this server.
 
+## WooCommerce purge add-on
+
+`extras/woo-purge/gp-woo-purge.php`, installed as `wp-content/mu-plugins/gp-woo-purge.php`. It is independent of the nginx part: it fixes stock GridPane purging and also works on sites without the switch. The add-on matters more once marketing URLs are served from the cache: before that, ad traffic always got a fresh page (BYPASS); now it gets the cached one, so a stale cached page reaches more visitors.
+
+**The problem.** GridPane's Nginx Helper (audited: 9.9.10) purges on `transition_post_status`, i.e. when WordPress updates the post. WooCommerce saves a change that touches only prices or stock straight to the database, without `wp_update_post()`, so Nginx Helper never hears about it. This covers the stock change after an order, REST API / ERP updates, imports, bulk edit, variation saves and scheduled sales. The cached product page keeps the old price or "in stock" until it expires (GridPane's default: 1 hour). Nginx Helper has no WooCommerce-specific code.
+
+On a live shop (WooCommerce 11.1, HPOS off, 5 days of logs): 53 products and 22 variations changed, and **not one** product or category URL was purged. At the same time, every order status change and order note purged the home page, `/author/admin/` and the feeds: about 190 home-page purges a day, on the page most ads land on.
+
+**What it does.**
+
+| Event | Purged |
+|---|---|
+| price, regular/sale price, sale dates, or **stock status** (in stock ↔ out of stock ↔ backorder) changes, by any code path | home page, shop page, the product, every public archive it is in (categories **including parent categories**, tags, brands, attributes with archives), each with its `/page/N/` URLs (up to 5) |
+| stock **quantity** changes but the status stays the same | nothing (a deliberate choice: "12 left" → "11 left" is not worth a purge) |
+| variation changes | its parent product (and the parent's archives) |
+| order, refund or coupon saved / status changed / note added | nothing any more (excluded from Nginx Helper's triggers) |
+
+- Every URL is purged once per request, at `shutdown`. A checkout that changes ten products purges the home and shop pages once.
+- It calls Nginx Helper's own purger, so it uses the site's purge method and appears in Nginx Helper's log. Without Nginx Helper, or with purging switched off, it does nothing.
+- Purging the clean URL also clears its gclid/utm variants, because they share its cache entry.
+- Only published products. Drafts and private products have no cached page.
+- `/page/N/` URLs are estimated from the product count and `loop_shop_per_page`. A page that does not exist costs one purge request that finds nothing; archives with more than 5 pages keep pages 6+ until they expire.
+- Filters: `gp_woo_purge_trigger_props`, `gp_woo_purge_excluded_post_types`, `gp_woo_purge_max_pages`, `gp_woo_purge_urls` (see the file header).
+
+**Not handled yet.**
+- **Bulk syncs (ERP, feeds, imports).** A sync that changes hundreds of prices or stock statuses in one request purges every affected product page and archive page once (the first product costs about 20 purge requests on a typical shop, each further one its own page plus any archives not purged yet). These are cheap local GETs, so a few hundred are fine. For shops whose sync changes most of the catalogue at once, a "purge everything above N products" threshold would be better. Check how the shop's sync behaves before installing.
+- Editing a product category only purges the home page (Nginx Helper's behaviour), not the category page itself.
+- Moving an order to the trash still purges the home page (Nginx Helper's trash hook has no post-type filter).
+- Multilingual sites (WPML, Polylang): only the URLs WordPress returns for the current language are purged.
+- GridPane's scripts were audited for the nginx files, not for `mu-plugins/`. Check `./install.sh --status` after a restore or clone, as for the switch files.
+
 ## GridPane Lua (hidden) vs this repo
 
 GridPane ships an undocumented feature that does something similar: `gp stack nginx -lua query-param-cache …` and `gp site <site> -lua-query-param-cache on`. We compared the two on the same WooCommerce site. The same scripted matrix ran in three modes, one after another: stock, this repo, GridPane Lua. Details:
@@ -201,12 +250,13 @@ GridPane may change its feature, so treat the Lua column as a snapshot of that v
 ## Repository layout
 
 ```
-install.sh                      install / enable / disable / apply list / status / uninstall
-test.sh                         tests: sandbox (default) or `live <site> [/path/]`
+install.sh                      install / enable / disable / apply list / status / uninstall / add-on
+test.sh                         tests: sandbox (default), `live <site> [/path/]` or `woo <site>`
 build-engine.py                 engine.conf generator
 server/marketing-params/        → /etc/nginx/marketing-params/  (php-context.conf, params.list)
 server/stubs/                   → /etc/nginx/conf.d/marketing-params.conf
 site/                           → /var/www/<site>/nginx/  (switch + FastCGI flag)
-tests/                          sandbox_test.py, live_test.py, fake_php.py (PHP-FPM stand-in)
+extras/woo-purge/               → /var/www/<site>/htdocs/wp-content/mu-plugins/gp-woo-purge.php
+tests/                          sandbox_test.py, live_test.py, fake_php.py (PHP-FPM stand-in), woo_purge_test.php
 docs/                           gridpane-lua-query-param-cache.md (GridPane's Lua feature: how it works, findings)
 ```

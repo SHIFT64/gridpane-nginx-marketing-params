@@ -2,11 +2,19 @@
 # Marketing params ignored by the GridPane FastCGI page cache.
 #
 #   ./install.sh                      install / update the server-wide engine (your list is kept)
-#   ./install.sh site.com [site2...]  ...and switch it ON for the given site(s)
-#   ./install.sh --disable site.com   switch it OFF for a site
+#   ./install.sh site.com [site2...]  ...and switch it ON for the given site(s); on a TTY it asks
+#                                     whether to add the WooCommerce purge add-on to Woo sites
+#   ./install.sh --full site.com      engine + switch + WooCommerce purge add-on, no questions
+#   ./install.sh --woo-purge site.com         only the WooCommerce purge add-on (mu-plugin)
+#   ./install.sh --remove-woo-purge site.com  remove the add-on from a site
+#   ./install.sh --disable site.com   switch it OFF for a site (the add-on stays)
 #   ./install.sh --apply-list         after editing params.list: nginx -t + reload, or restore
 #                                     the last good list if the test fails
 #   ./install.sh --uninstall          remove everything (all sites + engine)
+#
+# Installs first check GitHub for a newer version (refs only): if there is one, the script
+# stops before changing anything, runs `git pull --ff-only` and ./test.sh, and starts again with
+# the same arguments only if the test passes. Skip with GP_MKT_NO_UPDATE_CHECK=1 (offline server, testing a local change).
 #   ./install.sh --status             show what is installed / enabled / suspicious
 #
 # Limits (kept in /etc/nginx/marketing-params/limits.env and reused on every update):
@@ -25,8 +33,45 @@ FLAG=marketing-params-skip-fcgi-cache-context.conf    # "this vhost is FastCGI-c
 OLD_FILES=(/etc/nginx/extra.d/00-marketing-params-skip-fcgi-cache-context.conf "$DIR/skip-context.conf")
 OLD_SWITCH=marketing-params-main-context.conf
 STOCK_KEY='fastcgi_cache_key "$scheme$request_method$host$request_uri";'
+WOO_SRC="$HERE/extras/woo-purge/gp-woo-purge.php"
+WOO_NAME=gp-woo-purge.php
 
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
+
+update_check() {                 # update_check "$@": stop, pull and re-run if GitHub has a newer commit
+  local up remote branch head latest
+  [[ -z "${GP_MKT_NO_UPDATE_CHECK:-}" ]] || return 0
+  git -C "$HERE" rev-parse --git-dir >/dev/null 2>&1 || { echo "update check: $HERE is not a git checkout git can use (or git refuses its owner) - skipped"; return 0; }
+  up="$(git -C "$HERE" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)" \
+    || { echo "update check: no upstream branch - skipped"; return 0; }
+  remote="${up%%/*}"; branch="${up#*/}"; head="$(git -C "$HERE" rev-parse HEAD)"
+  if ! latest="$(timeout 15 git -C "$HERE" ls-remote "$remote" "refs/heads/$branch" 2>/dev/null | cut -f1)" || [[ -z "$latest" ]]; then
+    echo "!! update check: $remote unreachable - continuing with the local copy ($(git -C "$HERE" log -1 --format='%h %cs'))" >&2
+    return 0
+  fi
+  if [[ "$latest" == "$head" ]]; then echo "update check: up to date (${head:0:7})"; return 0; fi
+  if git -C "$HERE" merge-base --is-ancestor "$latest" HEAD 2>/dev/null; then
+    echo "update check: local copy is ahead of $up (${head:0:7}) - ok"; return 0
+  fi
+  echo "update check: a newer version is on $up (${latest:0:7}, this copy: ${head:0:7}) - nothing changed yet"
+  [[ -z "${GP_MKT_UPDATED:-}" ]] || { echo "!! still not up to date after updating - stopping" >&2; exit 1; }
+  if [[ -n "$(git -C "$HERE" status --porcelain --untracked-files=no)" ]]; then
+    echo "!! $HERE has local changes - not updating. Commit/stash them, or run with GP_MKT_NO_UPDATE_CHECK=1" >&2
+    exit 1
+  fi
+  git -C "$HERE" pull --ff-only --quiet || { echo "!! git pull failed - nothing was changed on the server" >&2; exit 1; }
+  git -C "$HERE" log --oneline "$head..HEAD" | sed 's/^/  + /'
+  echo "updated - running the sandbox test (./test.sh) before installing the new version"
+  if ! out="$("$HERE/test.sh" 2>&1)"; then
+    tail -15 <<<"$out" >&2
+    echo "!! ./test.sh fails on the new version - nothing was installed or changed (except the git checkout)" >&2
+    exit 1
+  fi
+  tail -1 <<<"$out"
+  echo "starting again"
+  GP_MKT_UPDATED=1 exec "$HERE/install.sh" "$@"
+}
+case "${1:-}" in --full|--woo-purge|[^-]*|"") update_check "$@" ;; esac
 
 BACKUP=""
 CHANGED=()
@@ -135,8 +180,35 @@ enable_site() {
   echo "ON  for $s"
 }
 
+# WooCommerce purge add-on: a mu-plugin, independent of the nginx part (it also helps sites
+# without the switch). Owned by the site user, like the rest of wp-content.
+woo_dir() { echo "/var/www/$1/htdocs/wp-content/mu-plugins"; }
+has_woo() { [[ -d "/var/www/$1/htdocs/wp-content/plugins/woocommerce" ]]; }
+woo_install() {
+  local s="$1" d owner
+  d="$(woo_dir "$s")"
+  [[ -d "/var/www/$s/htdocs/wp-content" ]] || rollback "no such site: /var/www/$s/htdocs/wp-content"
+  if ! has_woo "$s"; then echo "!! $s has no WooCommerce plugin - WooCommerce purge add-on skipped" >&2; return 0; fi
+  php -l "$WOO_SRC" >/dev/null || rollback "PHP syntax check of $WOO_SRC failed"
+  owner="$(stat -c %U:%G "/var/www/$s/htdocs/wp-content")"
+  [[ -d "$d" ]] || install -d -o "${owner%:*}" -g "${owner#*:}" -m 755 "$d"
+  backup "$d/$WOO_NAME"
+  install -o "${owner%:*}" -g "${owner#*:}" -m 644 "$WOO_SRC" "$d/$WOO_NAME"
+  [[ -d "/var/www/$s/htdocs/wp-content/plugins/nginx-helper" ]] \
+    || echo "!! $s has no Nginx Helper plugin - the add-on stays inactive until it is installed" >&2
+  echo "WOO purge add-on ON for $s ($d/$WOO_NAME)"
+}
+woo_ask() {                      # interactive installs only; --full answers yes for every site
+  local s="$1" a
+  has_woo "$s" || return 1
+  [[ -e "$(woo_dir "$s")/$WOO_NAME" ]] && return 0     # already there: keep it updated
+  [[ -t 0 && -t 1 ]] || return 1
+  read -r -p "  $s runs WooCommerce. Also install the WooCommerce purge add-on (see README)? [Y/n] " a
+  [[ -z "$a" || "$a" == [Yy]* ]]
+}
+
 status() {
-  local ok=1 f s d r bad
+  local ok=1 f s d r bad any=0
   echo "engine dir:   $DIR"
   for f in "$STUB_HTTP" "$DIR/engine.conf" "$DIR/php-context.conf" "$DIR/params.list"; do
     if [[ -e "$f" ]]; then echo "  ok      $f"; else echo "  MISSING $f"; ok=0; fi
@@ -176,13 +248,22 @@ status() {
     fi
     echo "  $s"
   done
+  echo "WooCommerce purge add-on (mu-plugins/$WOO_NAME):"
+  for f in /var/www/*/htdocs/wp-content/mu-plugins/$WOO_NAME; do
+    [[ -e "$f" ]] || continue
+    any=1; s="${f#/var/www/}"; s="${s%%/*}"
+    if [[ ! -d "/var/www/$s/htdocs/wp-content/plugins/nginx-helper" ]]; then echo "  $s   (no Nginx Helper plugin: inactive)"
+    elif ! cmp -s "$f" "$WOO_SRC"; then echo "  $s   !! differs from this repo's copy (run ./install.sh to update it)"; ok=0
+    else echo "  $s"; fi
+  done
+  [[ $any -eq 1 ]] || echo "  (none)"
   if ! nginx -t >/dev/null 2>&1; then echo "  !! nginx -t FAILS"; ok=0; fi
   [[ $ok -eq 1 ]] && echo "status: OK" || { echo "status: PROBLEMS FOUND"; return 1; }
 }
 
 case "${1:-}" in
   --status) status; exit $? ;;
-  -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+  -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
   --apply-list)
     if out="$(nginx -t 2>&1)"; then
       systemctl reload nginx
@@ -208,9 +289,18 @@ case "${1:-}" in
     reload
     echo "Tip: purge the site's cache afterwards (GridPane UI or Nginx Helper)."
     ;;
+  --woo-purge|--remove-woo-purge)
+    a="$1"; shift; [[ $# -gt 0 ]] || { echo "usage: $0 $a site.com [site2...]" >&2; exit 1; }
+    trap 'rollback "unexpected error"' ERR
+    for s in "$@"; do
+      if [[ "$a" == --woo-purge ]]; then woo_install "$s"; else del "$(woo_dir "$s")/$WOO_NAME"; echo "WOO purge add-on OFF for $s"; fi
+    done
+    cleanup                        # PHP files only: no nginx reload needed
+    ;;
   --uninstall)
     trap 'rollback "unexpected error"' ERR
-    for f in /var/www/*/nginx/$SWITCH /var/www/*/nginx/$FLAG /var/www/*/nginx/$OLD_SWITCH "${OLD_FILES[@]}" "$STUB_HTTP"; do del "$f"; done
+    for f in /var/www/*/nginx/$SWITCH /var/www/*/nginx/$FLAG /var/www/*/nginx/$OLD_SWITCH "${OLD_FILES[@]}" "$STUB_HTTP" \
+             /var/www/*/htdocs/wp-content/mu-plugins/$WOO_NAME; do del "$f"; done
     reload
     if [[ -e "$DIR/params.list" ]]; then
       cp -a "$DIR/params.list" /root/marketing-params.list.bak
@@ -219,14 +309,26 @@ case "${1:-}" in
     rm -rf "$DIR"
     echo "uninstalled"
     ;;
-  -*) echo "unknown option $1" >&2; sed -n '2,17p' "$0"; exit 1 ;;
-  *)
+  --full|[^-]*|"")
+    woo=ask
+    if [[ "${1:-}" == --full ]]; then
+      shift; [[ $# -gt 0 ]] || { echo "usage: $0 --full site.com [site2...]" >&2; exit 1; }
+      woo=yes
+    fi
     BACKUP_TMP="$(mktemp -d)"; trap 'rm -rf "$BACKUP_TMP"' EXIT
     trap 'rollback "unexpected error"' ERR
     install_engine
-    for s in "$@"; do enable_site "$s"; done
+    for s in "$@"; do
+      enable_site "$s"
+      if [[ $woo == yes ]] || woo_ask "$s"; then woo_install "$s"; fi
+    done
+    for f in /var/www/*/htdocs/wp-content/mu-plugins/$WOO_NAME; do   # update copies after git pull
+      [[ -e "$f" ]] && ! cmp -s "$f" "$WOO_SRC" || continue
+      s="${f#/var/www/}"; woo_install "${s%%/*}"
+    done
     reload
     trap - ERR
     status || true
     ;;
+  *) echo "unknown option $1" >&2; sed -n '2,24p' "$0"; exit 1 ;;
 esac
