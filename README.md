@@ -29,9 +29,11 @@ git clone https://github.com/SHIFT64/gridpane-nginx-marketing-params.git /root/g
 cd /root/gridpane-nginx-marketing-params && ./test.sh && ./install.sh yoursite.com
 ```
 
-To update later: `git pull && ./test.sh && ./install.sh` (your list is kept).
+To update later: `git pull && ./test.sh && ./install.sh` (your list is kept), or just `./install.sh`, which updates itself to the newest release (below).
 
-**Update check.** Every install command (`./install.sh [sites]`, `--full`, `--woo-purge`) first asks GitHub for the latest commit of the branch (`git ls-remote`: refs only, nothing is downloaded). If GitHub has a newer one, the script stops before changing anything, runs `git pull --ff-only`, prints the new commits, runs the sandbox test (`./test.sh`) and, only if it passes, starts again with the same arguments. It does not update when the checkout has local changes (it stops and says so), when the local copy is ahead of GitHub, or when GitHub is unreachable (it warns and continues with the local copy). `--status`, `--disable`, `--apply-list` and `--uninstall` never check. Skip the check with `GP_MKT_NO_UPDATE_CHECK=1 ./install.sh …`.
+Versions follow [semantic versioning](https://semver.org): one version for the whole repository, the WooCommerce add-on's `Version:` header included. While it is `0.x`, a minor bump (`0.2.0`) may change behaviour; patch releases (`0.1.1`) only fix things or change docs.
+
+**Update check.** Every install command (`./install.sh [sites]`, `--full`, `--woo-purge`) first asks GitHub for the newest [release](https://github.com/SHIFT64/gridpane-nginx-marketing-params/releases) tag, `vX.Y.Z` (`git ls-remote`: refs only, nothing is downloaded). Commits on `main` that are not released yet never count as an update. If the newest release is not in this checkout yet, the script stops before changing anything, fast-forwards to that release, prints the new commits, runs the sandbox test (`./test.sh`) and, only if it passes, starts again with the same arguments. It does not update when the checkout has local changes (it stops and says so), when the checkout already contains the release (e.g. you pulled `main`), or when GitHub is unreachable (it warns and continues with the local copy). `--status`, `--disable`, `--apply-list` and `--uninstall` never check. Skip the check with `GP_MKT_NO_UPDATE_CHECK=1 ./install.sh …`.
 
 The script:
 

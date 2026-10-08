@@ -11,11 +11,12 @@
 #   ./install.sh --apply-list         after editing params.list: nginx -t + reload, or restore
 #                                     the last good list if the test fails
 #   ./install.sh --uninstall          remove everything (all sites + engine)
-#
-# Installs first check GitHub for a newer version (refs only): if there is one, the script
-# stops before changing anything, runs `git pull --ff-only` and ./test.sh, and starts again with
-# the same arguments only if the test passes. Skip with GP_MKT_NO_UPDATE_CHECK=1 (offline server, testing a local change).
 #   ./install.sh --status             show what is installed / enabled / suspicious
+#
+# Installs first ask GitHub for the newest release tag (vX.Y.Z, refs only). If this checkout is
+# older, the script stops before changing anything, fast-forwards to that release, runs
+# ./test.sh and starts again with the same arguments only if the test passes.
+# Skip with GP_MKT_NO_UPDATE_CHECK=1 (offline server, testing a local change).
 #
 # Limits (kept in /etc/nginx/marketing-params/limits.env and reused on every update):
 #   MAX_PARAMS=32 MAX_LEN=4096 ./install.sh
@@ -38,28 +39,36 @@ WOO_NAME=gp-woo-purge.php
 
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
 
-update_check() {                 # update_check "$@": stop, pull and re-run if GitHub has a newer commit
-  local up remote branch head latest
+update_check() {                 # update_check "$@": stop, move to the newest release and re-run
+  local head here refs tag sha
   [[ -z "${GP_MKT_NO_UPDATE_CHECK:-}" ]] || return 0
   git -C "$HERE" rev-parse --git-dir >/dev/null 2>&1 || { echo "update check: $HERE is not a git checkout git can use (or git refuses its owner) - skipped"; return 0; }
-  up="$(git -C "$HERE" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)" \
-    || { echo "update check: no upstream branch - skipped"; return 0; }
-  remote="${up%%/*}"; branch="${up#*/}"; head="$(git -C "$HERE" rev-parse HEAD)"
-  if ! latest="$(timeout 15 git -C "$HERE" ls-remote "$remote" "refs/heads/$branch" 2>/dev/null | cut -f1)" || [[ -z "$latest" ]]; then
-    echo "!! update check: $remote unreachable - continuing with the local copy ($(git -C "$HERE" log -1 --format='%h %cs'))" >&2
+  git -C "$HERE" remote get-url origin >/dev/null 2>&1 || { echo "update check: no 'origin' remote - skipped"; return 0; }
+  head="$(git -C "$HERE" rev-parse HEAD)"
+  here="$(git -C "$HERE" describe --tags --always 2>/dev/null)"
+  if ! refs="$(timeout 15 git -C "$HERE" ls-remote --tags origin 'refs/tags/v*' 2>/dev/null)"; then
+    echo "!! update check: origin unreachable - continuing with this copy ($here)" >&2
     return 0
   fi
-  if [[ "$latest" == "$head" ]]; then echo "update check: up to date (${head:0:7})"; return 0; fi
-  if git -C "$HERE" merge-base --is-ancestor "$latest" HEAD 2>/dev/null; then
-    echo "update check: local copy is ahead of $up (${head:0:7}) - ok"; return 0
+  tag="$(sed -nE 's#^[0-9a-f]+[[:space:]]+refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+)(\^\{\})?$#\1#p' <<<"$refs" | sort -uV | tail -1)"
+  [[ -n "$tag" ]] || { echo "update check: no vX.Y.Z release on origin - skipped"; return 0; }
+  # an annotated tag is listed twice; the peeled ^{} line holds the commit
+  sha="$(awk -v t="refs/tags/$tag^{}" '$2 == t { print $1 }' <<<"$refs")"
+  [[ -n "$sha" ]] || sha="$(awk -v t="refs/tags/$tag" '$2 == t { print $1 }' <<<"$refs")"
+  if [[ "$sha" == "$head" ]] || git -C "$HERE" merge-base --is-ancestor "$sha" HEAD 2>/dev/null; then
+    echo "update check: up to date (newest release $tag, this copy: $here)"; return 0
   fi
-  echo "update check: a newer version is on $up (${latest:0:7}, this copy: ${head:0:7}) - nothing changed yet"
+  echo "update check: release $tag is newer than this copy ($here) - nothing changed yet"
   [[ -z "${GP_MKT_UPDATED:-}" ]] || { echo "!! still not up to date after updating - stopping" >&2; exit 1; }
   if [[ -n "$(git -C "$HERE" status --porcelain --untracked-files=no)" ]]; then
     echo "!! $HERE has local changes - not updating. Commit/stash them, or run with GP_MKT_NO_UPDATE_CHECK=1" >&2
     exit 1
   fi
-  git -C "$HERE" pull --ff-only --quiet || { echo "!! git pull failed - nothing was changed on the server" >&2; exit 1; }
+  if ! git -C "$HERE" fetch -q --no-tags origin "refs/tags/$tag:refs/tags/$tag" \
+     || ! git -C "$HERE" merge -q --ff-only "$tag"; then
+    echo "!! could not fast-forward to $tag (local commits?) - nothing was changed on the server" >&2
+    exit 1
+  fi
   git -C "$HERE" log --oneline "$head..HEAD" | sed 's/^/  + /'
   echo "updated - running the sandbox test (./test.sh) before installing the new version"
   if ! out="$("$HERE/test.sh" 2>&1)"; then
@@ -263,7 +272,7 @@ status() {
 
 case "${1:-}" in
   --status) status; exit $? ;;
-  -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+  -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
   --apply-list)
     if out="$(nginx -t 2>&1)"; then
       systemctl reload nginx
@@ -330,5 +339,5 @@ case "${1:-}" in
     trap - ERR
     status || true
     ;;
-  *) echo "unknown option $1" >&2; sed -n '2,24p' "$0"; exit 1 ;;
+  *) echo "unknown option $1" >&2; sed -n '2,25p' "$0"; exit 1 ;;
 esac
