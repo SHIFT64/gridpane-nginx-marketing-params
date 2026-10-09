@@ -7,8 +7,9 @@ Live smoke test of an installed site, run ON the GridPane server.
                                         trailing slash -> the redirect check runs too)
 
 Talks to the local nginx (127.0.0.1:443, SNI = the site), so no proxy/CDN in front is involved.
-Only GET requests; it purges nothing. The first request may create the normal cache entry
-of the page (exactly what a visitor would do).
+Only GET requests. The first request may create the normal cache entry of the page (exactly
+what a visitor would do). The last check sends one purge request the way WordPress does
+(the site's hostname via normal DNS) for a URL that is never cached, so it purges nothing.
 """
 import argparse
 import http.client
@@ -128,6 +129,28 @@ def main():
             print("  skip www check (www.%s does not redirect: %s)" % (a.site, h7[":status"]))
     except Exception as e:
         print("  skip www check (%s)" % e.__class__.__name__)
+
+    # Nginx Helper sends GET https://<site>/purge/<path> through normal DNS (often the public IP),
+    # not to 127.0.0.1. If Basic Auth or an IP allowlist answers it, no purge ever works.
+    print(c("1", "\nPurge requests reach this nginx (the way WordPress sends them)"))
+    probe = "/purge/gp-mkt-purge-probe-%s/" % tok          # a URL that is never cached: purges nothing
+    try:
+        ip = socket.getaddrinfo(a.site, 443, proto=socket.IPPROTO_TCP)[0][4][0]
+    except Exception as e:
+        ip = "unresolved (%s)" % e.__class__.__name__
+    try:
+        conn = http.client.HTTPSConnection(a.site, 443, timeout=10, context=ssl.create_default_context())
+        conn.request("GET", probe, headers={"User-Agent": "gp-marketing-params-live-test"})
+        st = conn.getresponse().status
+        conn.close()
+        hint = {401: "Basic Auth answers the server's own requests: allow the server IP (acl.conf) or Nginx Helper cannot purge",
+                403: "an allowlist blocks the server's own requests to /purge/ (acl.conf / 7G / firewall)",
+                404: "no purge location answers: is FastCGI caching (ngx_cache_purge) on for this site?"}.get(st, "")
+        T.check("GET %s via %s (%s) -> 412/200 (not blocked)" % (probe, a.site, ip), st in (200, 412),
+                extra="status=%s %s" % (st, hint))
+    except Exception as e:
+        T.check("GET %s via %s (%s) -> 412/200 (not blocked)" % (probe, a.site, ip), False,
+                extra="%s: %s" % (e.__class__.__name__, e))
 
     total = T.passed + len(T.failed)
     print()

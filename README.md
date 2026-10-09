@@ -92,11 +92,12 @@ Same, using that site's rendered template.
 ./test.sh live yoursite.com /some-page/
 ```
 
-**Live test after installation.** It sends GET requests only, straight to the local nginx (127.0.0.1, so no proxy/CDN in front is involved), and purges nothing. It checks:
+**Live test after installation.** It sends GET requests only, straight to the local nginx (127.0.0.1, so no proxy/CDN in front is involved). It checks:
 - HIT with gclid
 - a shared entry with the clean URL
 - BYPASS for another parameter
 - that the missing-trailing-slash and www → apex redirects keep the parameters
+- that **purge requests reach nginx the way WordPress sends them**: `GET https://<site>/purge/<probe>/` through normal DNS (often the server's public IP, not 127.0.0.1) must answer 412/200. A 401/403 means Basic Auth or an IP allowlist blocks the server's own requests, so Nginx Helper cannot purge anything (seen for 23 hours after a domain swap). The probe URL is never cached, so nothing is purged.
 
 Give it a page with a trailing `/` so the redirect test runs too.
 
@@ -106,7 +107,7 @@ Exit codes: `0` = all PASS, `1` = at least one FAIL, `2` = setup error (e.g. Gri
 ./test.sh woo yourshop.com
 ```
 
-**WooCommerce add-on test.** Runs inside the site's WordPress (`gp wp … eval-file`). It fires the hook the WooCommerce data store fires after a save, for a real product and variation, and checks which URLs reach Nginx Helper's purger. Every outgoing HTTP request is short-circuited and the unlink method is pointed at a missing file, so **nothing is purged and nothing is saved**. Covered: quantity-only change → no purge; stock status / price / scheduled sale → purge; variation → parent; parent categories; one purge per URL per request; drafts; order and order-note exclusions.
+**WooCommerce add-on test.** Runs inside the site's WordPress (`gp wp … eval-file`). It fires the hook the WooCommerce data store fires after a save, for a real product and variation, and checks which URLs reach Nginx Helper's purger. Every outgoing HTTP request is short-circuited and the unlink method is pointed at a missing file, so **nothing is purged and nothing is saved**. Covered: quantity-only change → no purge; stock status / price / scheduled sale → purge; variation → parent; parent categories; one purge per URL per request; drafts; order and order-note exclusions; the home-page setting (both values); Nginx Helper trimmed (no feeds, no AMP fetch: one `purge_url()` = one request; `edit_term`/`delete_term` handler replaced; 176 term edits → one home-page purge). Not covered (needs a real web request): purging after the response.
 
 ## Parameter list
 
@@ -201,17 +202,31 @@ On a live shop (WooCommerce 11.1, HPOS off, 5 days of logs): 53 products and 22 
 | stock **quantity** changes but the status stays the same | nothing (a deliberate choice: "12 left" → "11 left" is not worth a purge) |
 | variation changes | its parent product (and the parent's archives) |
 | order, refund or coupon saved / status changed / note added | nothing any more (excluded from Nginx Helper's triggers) |
+| any term edited or deleted (categories, tags, brands, menus…) | **one** home-page purge per request, instead of Nginx Helper's home page + 3 feeds per term (an hourly import of 176 categories made 704 requests); nothing when the home page is switched off |
+
+**It also trims Nginx Helper's own purges** (in memory, for every request; nothing is saved):
+
+- **No feed purges.** GridPane's templates never cache `/feed/` (it is in the `$skip_cache` rule), but Nginx Helper purges `feed/`, `feed/atom/` and `feed/rdf/` next to every URL: 3 of every 4 purge requests could never clear anything. Filter: `gp_woo_purge_disable_feed_purges`.
+- **No AMP fetches.** GridPane's fork "purges" the AMP version by **requesting the page** `…/amp/` instead of `/purge/…/amp/`: a full PHP render of a 404 for every purged URL whenever the purge runs during a page view. Seen on a live shop: ~70 a day each of `/amp/`, `/author/admin/amp/` and `/?post_type=shop_order&p=…/amp/`. Switched off unless an AMP plugin is active (filter `gp_woo_purge_disable_amp_purges`).
+- **After the response.** Every purge is a blocking HTTPS request from the server to itself (~16 ms each, measured). The add-on calls `fastcgi_finish_request()` first, so a checkout, a payment callback or an admin save no longer waits for 10–30 loopback requests. WP-CLI runs are unchanged.
+
+**Home page setting.** By default the home page is purged with every product change and once per request for term edits. A shop whose home page shows no prices or stock (e.g. a B2B catalogue with its own navigation cache) can switch that off:
+
+```bash
+gp wp yourshop.com option update gp_woo_purge_home no      # back on: option delete gp_woo_purge_home
+```
 
 - Every URL is purged once per request, at `shutdown`. A checkout that changes ten products purges the home and shop pages once.
 - It calls Nginx Helper's own purger, so it uses the site's purge method and appears in Nginx Helper's log. Without Nginx Helper, or with purging switched off, it does nothing.
 - Purging the clean URL also clears its gclid/utm variants, because they share its cache entry.
 - Only published products. Drafts and private products have no cached page.
 - `/page/N/` URLs are estimated from the product count and `loop_shop_per_page`. A page that does not exist costs one purge request that finds nothing; archives with more than 5 pages keep pages 6+ until they expire.
-- Filters: `gp_woo_purge_trigger_props`, `gp_woo_purge_excluded_post_types`, `gp_woo_purge_max_pages`, `gp_woo_purge_urls` (see the file header).
+- Filters: `gp_woo_purge_home`, `gp_woo_purge_disable_feed_purges`, `gp_woo_purge_disable_amp_purges`, `gp_woo_purge_trigger_props`, `gp_woo_purge_excluded_post_types`, `gp_woo_purge_max_pages`, `gp_woo_purge_urls` (see the file header).
+- The trimming relies on internals of GridPane's Nginx Helper fork (`$nginx_helper_admin->options`, `$nginx_purger`), checked with guards; `./test.sh woo` tells you if a new Nginx Helper version breaks it.
 
 **Not handled yet.**
 - **Bulk syncs (ERP, feeds, imports).** A sync that changes hundreds of prices or stock statuses in one request purges every affected product page and archive page once (the first product costs about 20 purge requests on a typical shop, each further one its own page plus any archives not purged yet). These are cheap local GETs, so a few hundred are fine. For shops whose sync changes most of the catalogue at once, a "purge everything above N products" threshold would be better. Check how the shop's sync behaves before installing.
-- Editing a product category only purges the home page (Nginx Helper's behaviour), not the category page itself.
+- **Editing a term does not purge its archive** (e.g. `/kategoria/x/` after a rename), as in stock Nginx Helper; only the home page, once per request. Purging archives per edited term would turn an import that rewrites unchanged categories into hundreds of empty purges, so it waits for a queued design (e.g. Action Scheduler, one run after the import). Fix such imports at the source: write only real changes.
 - Moving an order to the trash still purges the home page (Nginx Helper's trash hook has no post-type filter).
 - Multilingual sites (WPML, Polylang): only the URLs WordPress returns for the current language are purged.
 - GridPane's scripts were audited for the nginx files, not for `mu-plugins/`. Check `./install.sh --status` after a restore or clone, as for the switch files.

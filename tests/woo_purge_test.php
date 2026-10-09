@@ -59,10 +59,42 @@ function gpwt_fire( $product, $props ) {
 	return GP_Woo_Purge::flush();
 }
 
-$home = trailingslashit( home_url() );
+$home_on = GP_Woo_Purge::purge_home();
+$home    = trailingslashit( home_url() );
 // The product archive is listed even without an assigned shop page (then it is /shop/).
 $shop = (string) get_post_type_archive_link( 'product' );
 gpwt_out( '  shop / product archive: ' . ( $shop ? wp_make_link_relative( $shop ) : '-' ) . ( wc_get_page_id( 'shop' ) > 0 ? '' : ' (no shop page assigned)' ) );
+gpwt_out( '  home page purge: ' . ( $home_on ? 'on' : 'off (option gp_woo_purge_home = no)' ) );
+
+gpwt_out( '' );
+gpwt_out( 'Nginx Helper trimmed (in memory, this request)' );
+gpwt( 'feed purges off (GridPane never caches /feed/)', 0 === ( $nginx_helper_admin->options['purge_feeds'] ?? null ), 'purge_feeds=' . var_export( $nginx_helper_admin->options['purge_feeds'] ?? null, true ) );
+$amp_plugin = defined( 'AMP__VERSION' ) || defined( 'AMPFORWP_VERSION' ) || function_exists( 'amp_is_request' ) || function_exists( 'is_amp_endpoint' );
+if ( $amp_plugin ) {
+	gpwt_out( '  SKIP an AMP plugin is active: AMP purges stay on' );
+} else {
+	gpwt( 'AMP "purges" off (no AMP plugin; GridPane\'s fork fetches the /amp/ page instead of purging it)', 0 === ( $nginx_helper_admin->options['purge_amp_urls'] ?? null ), 'purge_amp_urls=' . var_export( $nginx_helper_admin->options['purge_amp_urls'] ?? null, true ) );
+}
+foreach ( array( 'edit_term', 'delete_term' ) as $hook ) {
+	gpwt(
+		"$hook: Nginx Helper's handler replaced by the add-on's",
+		false === has_action( $hook, array( $nginx_purger, 'purge_on_term_taxonomy_edited' ) ) && false !== has_action( $hook, array( 'GP_Woo_Purge', 'on_term_changed' ) )
+	);
+}
+// One real call into Nginx Helper's purger, as on a page view (is_page() is what enables the AMP path).
+$GLOBALS['gpwt']['http'] = array();
+$was_page                 = $GLOBALS['wp_query']->is_page;
+$GLOBALS['wp_query']->is_page = true;
+$nginx_purger->purge_url( $home );   // Nginx Helper's default: $feed = true
+$GLOBALS['wp_query']->is_page = $was_page;
+gpwt( "one Nginx Helper purge_url() = 1 request (no feed, no /amp/ fetch)", 1 === count( $GLOBALS['gpwt']['http'] ), implode( ' ', array_map( 'wp_make_link_relative', $GLOBALS['gpwt']['http'] ) ) );
+
+$GLOBALS['gpwt']['sent'] = array();
+for ( $i = 0; $i < 176; $i++ ) {
+	GP_Woo_Purge::on_term_changed();   // what 176 edit_term calls do (called directly: no other handlers run)
+}
+$u = GP_Woo_Purge::flush();
+gpwt( '176 term edits in one request -> ' . ( $home_on ? 'one home-page purge' : 'no purge (home page off)' ), $home_on ? array( $home ) === $u : ! $u, gpwt_rel( $u ) );
 
 // A published simple product, preferably in a child category (to see the parent purged too).
 $simple = null;
@@ -95,7 +127,10 @@ $u = gpwt_fire( $simple, array( 'stock_quantity' ) );
 gpwt( 'stock quantity change alone -> no purge', ! $u && ! $GLOBALS['gpwt']['sent'], gpwt_rel( $u ) );
 
 $u = gpwt_fire( $simple, array( 'stock_quantity', 'stock_status' ) );
-$want = array( $home, get_permalink( $simple->get_id() ) );
+$want = array( get_permalink( $simple->get_id() ) );
+if ( $home_on ) {
+	$want[] = $home;
+}
 if ( $shop ) {
 	$want[] = $shop;
 }
@@ -138,6 +173,21 @@ if ( $variation ) {
 do_action( 'woocommerce_product_object_updated_props', $simple, array( 'regular_price' ) );
 $u = GP_Woo_Purge::flush();
 gpwt( 'several saves in one request -> each URL purged once', $u && count( $u ) === count( array_unique( $GLOBALS['gpwt']['sent'] ) ) && count( $GLOBALS['gpwt']['sent'] ) === count( $u ) );
+
+// The other value of the home-page setting, through its filter (the option is not touched).
+$flip = static function () use ( $home_on ) {
+	return ! $home_on;
+};
+add_filter( 'gp_woo_purge_home', $flip );
+$u = gpwt_fire( $simple, array( 'stock_status' ) );
+GP_Woo_Purge::on_term_changed();
+$t = GP_Woo_Purge::flush();
+remove_filter( 'gp_woo_purge_home', $flip );
+gpwt(
+	'home page ' . ( $home_on ? 'off' : 'on' ) . ' (filter) -> ' . ( $home_on ? 'not' : 'also' ) . ' purged for products and term edits',
+	in_array( get_permalink( $simple->get_id() ), $u, true ) && ( $home_on ? ! in_array( $home, $u, true ) && ! $t : in_array( $home, $u, true ) && array( $home ) === $t ),
+	'product: ' . gpwt_rel( $u ) . ' | terms: ' . gpwt_rel( $t )
+);
 gpwt( 'queue is empty after the flush', ! GP_Woo_Purge::flush() );
 
 $draft = wc_get_products( array( 'status' => 'draft', 'limit' => 1 ) );
