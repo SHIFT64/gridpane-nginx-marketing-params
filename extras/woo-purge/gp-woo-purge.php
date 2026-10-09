@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WooCommerce purge for Nginx Helper
  * Description: Purges the page cache of a product, its archives, the shop page and the home page when WooCommerce changes a price or a stock status without a post update (orders, REST API, imports, bulk edit, scheduled sales). Stops orders, refunds and coupons from purging the home page. Installed by gridpane-nginx-marketing-params.
- * Version: 0.1.1
+ * Version: 0.1.2
  * Requires PHP: 7.4
  *
  * Why: Nginx Helper purges on `transition_post_status`, i.e. only when WordPress updates the post.
@@ -22,7 +22,7 @@ defined( 'ABSPATH' ) || exit;
 
 final class GP_Woo_Purge {
 
-	const VERSION = '0.1.1';
+	const VERSION = '0.1.2';
 
 	/** @var array<int, string[]> product ID => props that changed */
 	private static $queue = array();
@@ -93,9 +93,10 @@ final class GP_Woo_Purge {
 		$max_pages = max( 1, (int) apply_filters( 'gp_woo_purge_max_pages', 5 ) );
 		$urls      = array( trailingslashit( home_url() ) );
 
-		$shop = wc_get_page_id( 'shop' );
-		if ( $shop > 0 && 'publish' === get_post_status( $shop ) ) {
-			$urls = array_merge( $urls, self::paged( get_permalink( $shop ), (int) wp_count_posts( 'product' )->publish, $max_pages ) );
+		// The shop page's URL, or /shop/ (WooCommerce's product archive) when no shop page is assigned.
+		$shop = get_post_type_archive_link( 'product' );
+		if ( $shop ) {
+			$urls = array_merge( $urls, self::paged( $shop, (int) wp_count_posts( 'product' )->publish, $max_pages ) );
 		}
 		foreach ( array_keys( $queue ) as $id ) {
 			$urls = array_merge( $urls, self::product_urls( $id, $max_pages ) );

@@ -60,7 +60,9 @@ function gpwt_fire( $product, $props ) {
 }
 
 $home = trailingslashit( home_url() );
-$shop = wc_get_page_id( 'shop' ) > 0 ? get_permalink( wc_get_page_id( 'shop' ) ) : '';
+// The product archive is listed even without an assigned shop page (then it is /shop/).
+$shop = (string) get_post_type_archive_link( 'product' );
+gpwt_out( '  shop / product archive: ' . ( $shop ? wp_make_link_relative( $shop ) : '-' ) . ( wc_get_page_id( 'shop' ) > 0 ? '' : ' (no shop page assigned)' ) );
 
 // A published simple product, preferably in a child category (to see the parent purged too).
 $simple = null;
@@ -107,7 +109,7 @@ foreach ( (array) get_the_terms( $simple->get_id(), 'product_cat' ) as $t ) {
 	}
 }
 $missing = array_diff( array_merge( $want, $cats ), $u );
-gpwt( 'stock status change -> home, shop, product, its categories + parent categories', $u && ! $missing, 'missing: ' . gpwt_rel( $missing ) );
+gpwt( 'stock status change -> home, shop/product archive, product, its categories + parent categories', $u && ! $missing, 'missing: ' . gpwt_rel( $missing ) );
 gpwt( 'every URL reached the Nginx Helper purger once', $u && $GLOBALS['gpwt']['sent'] === $u, 'sent: ' . count( $GLOBALS['gpwt']['sent'] ) . ' vs ' . count( $u ) );
 gpwt( 'no URL carries a query string', $u && ! array_filter( $u, static function ( $x ) { return false !== strpos( $x, '?' ); } ) );
 gpwt_out( '       ' . count( $u ) . ' URLs: ' . gpwt_rel( $u ) );
