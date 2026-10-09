@@ -190,6 +190,30 @@ gpwt(
 );
 gpwt( 'queue is empty after the flush', ! GP_Woo_Purge::flush() );
 
+// Direct meta writes (update_post_meta, no WooCommerce save), e.g. a theme's stock-sync worker.
+// The handler is called directly: firing updated_post_meta would run other plugins' handlers.
+foreach ( array( 'added_post_meta', 'updated_post_meta' ) as $hook ) {
+	gpwt( "$hook hooked (direct _stock_status / _price writes)", false !== has_action( $hook, array( 'GP_Woo_Purge', 'on_meta_changed' ) ) );
+}
+$GLOBALS['gpwt']['sent'] = array();
+GP_Woo_Purge::on_meta_changed( 0, $simple->get_id(), '_stock_status' );
+$u = GP_Woo_Purge::flush();
+gpwt( 'direct _stock_status meta change -> product purged', in_array( get_permalink( $simple->get_id() ), $u, true ), gpwt_rel( $u ) );
+GP_Woo_Purge::on_meta_changed( 0, $simple->get_id(), '_stock' );
+GP_Woo_Purge::on_meta_changed( 0, $simple->get_id(), '_edit_lock' );
+$u = GP_Woo_Purge::flush();
+gpwt( 'direct _stock (quantity) or other meta change -> no purge', ! $u, gpwt_rel( $u ) );
+if ( $variation ) {
+	GP_Woo_Purge::on_meta_changed( 0, $variation->get_id(), '_price' );
+	$u = GP_Woo_Purge::flush();
+	gpwt( 'direct variation _price meta change -> parent product purged', in_array( get_permalink( $variation->get_parent_id() ), $u, true ), gpwt_rel( $u ) );
+}
+do_action( 'woocommerce_product_object_updated_props', $simple, array( 'stock_status' ) );
+GP_Woo_Purge::on_meta_changed( 0, $simple->get_id(), '_stock_status' );   // a WooCommerce save fires both
+$GLOBALS['gpwt']['sent'] = array();
+$u = GP_Woo_Purge::flush();
+gpwt( 'WooCommerce save + its meta write -> each URL once', $u && count( $u ) === count( array_unique( $GLOBALS['gpwt']['sent'] ) ) );
+
 $draft = wc_get_products( array( 'status' => 'draft', 'limit' => 1 ) );
 if ( $draft ) {
 	$u = gpwt_fire( $draft[0], array( 'stock_status' ) );

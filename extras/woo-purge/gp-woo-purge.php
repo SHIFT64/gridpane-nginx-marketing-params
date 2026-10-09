@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WooCommerce purge for Nginx Helper
  * Description: Purges the page cache of a product, its archives, the shop page and the home page when WooCommerce changes a price or a stock status without a post update (orders, REST API, imports, bulk edit, scheduled sales). Trims Nginx Helper's own purges: no orders/coupons, no feeds, no AMP fetches, one home-page purge per request for term edits, all sent after the response. Installed by gridpane-nginx-marketing-params.
- * Version: 0.2.0
+ * Version: 0.2.1
  * Requires PHP: 7.4
  *
  * Why: Nginx Helper purges on `transition_post_status`, i.e. only when WordPress updates the post.
@@ -29,6 +29,8 @@
  *   gp_woo_purge_disable_amp_purges   bool   stop Nginx Helper's AMP fetches (default: no AMP plugin)
  *   gp_woo_purge_excluded_post_types  array  post types that never trigger Nginx Helper purges
  *   gp_woo_purge_trigger_props        array  WooCommerce props that trigger a purge
+ *   gp_woo_purge_meta_keys            array  post meta keys whose direct change triggers a purge
+ *                                            (default _stock_status, _price)
  *   gp_woo_purge_max_pages            int    archive pages purged per term / shop (default 5)
  *   gp_woo_purge_urls                 array  final URL list (second arg: product IDs)
  */
@@ -37,7 +39,7 @@ defined( 'ABSPATH' ) || exit;
 
 final class GP_Woo_Purge {
 
-	const VERSION = '0.2.0';
+	const VERSION = '0.2.1';
 
 	/** @var array<int, string[]> product ID => props that changed */
 	private static $queue = array();
@@ -49,6 +51,8 @@ final class GP_Woo_Purge {
 		add_filter( 'rt_nginx_helper_exclude_post_types', array( __CLASS__, 'exclude_post_types' ) );
 		add_filter( 'rt_nginx_helper_comment_change_exclude_post_types', array( __CLASS__, 'exclude_post_types' ) );
 		add_action( 'woocommerce_product_object_updated_props', array( __CLASS__, 'on_updated_props' ), 10, 2 );
+		add_action( 'added_post_meta', array( __CLASS__, 'on_meta_changed' ), 10, 3 );
+		add_action( 'updated_post_meta', array( __CLASS__, 'on_meta_changed' ), 10, 3 );
 		add_action( 'shutdown', array( __CLASS__, 'on_shutdown' ), PHP_INT_MAX );
 		self::tune_nginx_helper();
 	}
@@ -119,11 +123,37 @@ final class GP_Woo_Purge {
 		if ( ! $hit ) {
 			return;
 		}
-		$id = $product->is_type( 'variation' ) ? $product->get_parent_id() : $product->get_id();
+		self::queue( $product->is_type( 'variation' ) ? $product->get_parent_id() : $product->get_id(), $hit );
+	}
+
+	/**
+	 * Code that writes stock status or price straight to post meta (update_post_meta), bypassing
+	 * the WooCommerce data store: stock-sync workers, ERP imports, checkout stock checks. WordPress
+	 * fires these hooks only when the stored value really changes, so a rewrite of the same value
+	 * purges nothing. A WooCommerce save fires them too; the queue dedupes.
+	 */
+	public static function on_meta_changed( $meta_id, $object_id, $meta_key ) {
+		static $keys = null;
+		if ( null === $keys ) {
+			$keys = (array) apply_filters( 'gp_woo_purge_meta_keys', array( '_stock_status', '_price' ) );
+		}
+		if ( ! in_array( $meta_key, $keys, true ) ) {
+			return;
+		}
+		$type = get_post_type( $object_id );
+		if ( 'product' === $type ) {
+			self::queue( (int) $object_id, array( 'meta' . $meta_key ) );
+		} elseif ( 'product_variation' === $type ) {
+			self::queue( (int) wp_get_post_parent_id( $object_id ), array( 'meta' . $meta_key ) );
+		}
+	}
+
+	/** Queue a published product (parent ID for variations) for the shutdown purge. */
+	private static function queue( $id, $why ) {
 		if ( ! $id || 'publish' !== get_post_status( $id ) ) {
 			return;
 		}
-		self::$queue[ $id ] = array_values( array_unique( array_merge( self::$queue[ $id ] ?? array(), $hit ) ) );
+		self::$queue[ $id ] = array_values( array_unique( array_merge( self::$queue[ $id ] ?? array(), $why ) ) );
 	}
 
 	/**

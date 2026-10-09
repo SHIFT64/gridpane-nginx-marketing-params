@@ -107,7 +107,7 @@ Exit codes: `0` = all PASS, `1` = at least one FAIL, `2` = setup error (e.g. Gri
 ./test.sh woo yourshop.com
 ```
 
-**WooCommerce add-on test.** Runs inside the site's WordPress (`gp wp … eval-file`). It fires the hook the WooCommerce data store fires after a save, for a real product and variation, and checks which URLs reach Nginx Helper's purger. Every outgoing HTTP request is short-circuited and the unlink method is pointed at a missing file, so **nothing is purged and nothing is saved**. Covered: quantity-only change → no purge; stock status / price / scheduled sale → purge; variation → parent; parent categories; one purge per URL per request; drafts; order and order-note exclusions; the home-page setting (both values); Nginx Helper trimmed (no feeds, no AMP fetch: one `purge_url()` = one request; `edit_term`/`delete_term` handler replaced; 176 term edits → one home-page purge). Not covered (needs a real web request): purging after the response.
+**WooCommerce add-on test.** Runs inside the site's WordPress (`gp wp … eval-file`). It fires the hook the WooCommerce data store fires after a save, for a real product and variation, and checks which URLs reach Nginx Helper's purger. Every outgoing HTTP request is short-circuited and the unlink method is pointed at a missing file, so **nothing is purged and nothing is saved**. Covered: quantity-only change → no purge; stock status / price / scheduled sale → purge; variation → parent; parent categories; one purge per URL per request; drafts; order and order-note exclusions; direct `_stock_status` / `_price` meta writes (and `_stock` alone → no purge); the home-page setting (both values); Nginx Helper trimmed (no feeds, no AMP fetch: one `purge_url()` = one request; `edit_term`/`delete_term` handler replaced; 176 term edits → one home-page purge). Not covered (needs a real web request): purging after the response.
 
 ## Parameter list
 
@@ -199,6 +199,7 @@ On a live shop (WooCommerce 11.1, HPOS off, 5 days of logs): 53 products and 22 
 | Event | Purged |
 |---|---|
 | price, regular/sale price, sale dates, or **stock status** (in stock ↔ out of stock ↔ backorder) changes, by any code path | home page, shop page, the product, every public archive it is in (categories **including parent categories**, tags, brands, attributes with archives), each with its `/page/N/` URLs (up to 5) |
+| `_stock_status` or `_price` **post meta** changes without a WooCommerce save (code calling `update_post_meta()` directly: stock-sync workers, ERP imports, checkout stock checks) | the same as above. WordPress fires `added_post_meta` / `updated_post_meta` only when the stored value really changes, so rewriting the same value purges nothing. Filter: `gp_woo_purge_meta_keys` |
 | stock **quantity** changes but the status stays the same | nothing (a deliberate choice: "12 left" → "11 left" is not worth a purge) |
 | variation changes | its parent product (and the parent's archives) |
 | order, refund or coupon saved / status changed / note added | nothing any more (excluded from Nginx Helper's triggers) |
