@@ -41,6 +41,9 @@ final class GP_Woo_Purge {
 
 	const VERSION = '0.3.0';
 
+	/** Key in Nginx Helper's in-memory options: the real values of the keys trimmed here. Never saved. */
+	const TUNED = '_gp_woo_purge_tuned';
+
 	/** @var array<int, string[]> product ID => props that changed */
 	private static $queue = array();
 
@@ -58,8 +61,10 @@ final class GP_Woo_Purge {
 	}
 
 	/**
-	 * In-memory changes to Nginx Helper for this request only (nothing is saved), so they also
-	 * hold on GridPane sites where the plugin runs on defaults and wp-config constants.
+	 * In-memory changes to Nginx Helper for this request only, so they also hold on GridPane sites
+	 * where the plugin runs on defaults and wp-config constants. Nothing is saved: the real values
+	 * of the changed keys travel with the array (self::TUNED) and keep_real_options() puts them
+	 * back whenever Nginx Helper saves it.
 	 */
 	private static function tune_nginx_helper() {
 		global $nginx_helper_admin, $nginx_purger;
@@ -67,12 +72,23 @@ final class GP_Woo_Purge {
 		if ( ! is_object( $nginx_helper_admin ) || ! isset( $nginx_helper_admin->options ) || ! is_array( $nginx_helper_admin->options ) ) {
 			return;
 		}
+		$off = array();
 		if ( apply_filters( 'gp_woo_purge_disable_feed_purges', true ) ) {
-			$nginx_helper_admin->options['purge_feeds'] = 0;
+			$off[] = 'purge_feeds';
 		}
 		$amp = defined( 'AMP__VERSION' ) || defined( 'AMPFORWP_VERSION' ) || function_exists( 'amp_is_request' ) || function_exists( 'is_amp_endpoint' );
 		if ( apply_filters( 'gp_woo_purge_disable_amp_purges', ! $amp ) ) {
-			$nginx_helper_admin->options['purge_amp_urls'] = 0;
+			$off[] = 'purge_amp_urls';
+		}
+		foreach ( $off as $key ) {
+			$nginx_helper_admin->options[ self::TUNED ][ $key ] = $nginx_helper_admin->options[ $key ] ?? 0;
+			$nginx_helper_admin->options[ $key ]                = 0;
+		}
+		if ( $off ) {
+			// update_site_option() (Nginx Helper), update_option() (single site, wp-cli), add_site_option().
+			foreach ( array( 'pre_update_site_option_', 'pre_update_option_', 'pre_add_site_option_' ) as $hook ) {
+				add_filter( $hook . 'rt_wp_nginx_helper_options', array( __CLASS__, 'keep_real_options' ), PHP_INT_MIN, 2 );
+			}
 		}
 		if ( is_object( $nginx_purger ) && method_exists( $nginx_purger, 'purge_on_term_taxonomy_edited' ) ) {
 			foreach ( array( 'edit_term', 'delete_term' ) as $hook ) {
@@ -82,6 +98,24 @@ final class GP_Woo_Purge {
 				}
 			}
 		}
+	}
+
+	/**
+	 * Nginx Helper saves its whole in-memory options array when Preload Cache runs (admin_init) and
+	 * when a post is scheduled or a scheduled post is deleted. That array carries the trimming above,
+	 * which would then outlive the add-on. An array carrying self::TUNED is such a save: the trimmed
+	 * keys get their stored values back (the values before trimming when none are stored). Saves
+	 * built elsewhere (the settings page, wp-cli) never carry it and are kept as they are.
+	 */
+	public static function keep_real_options( $value, $old_value = false ) {
+		if ( ! is_array( $value ) || ! isset( $value[ self::TUNED ] ) ) {
+			return $value;
+		}
+		foreach ( (array) $value[ self::TUNED ] as $key => $real ) {
+			$value[ $key ] = is_array( $old_value ) && array_key_exists( $key, $old_value ) ? $old_value[ $key ] : $real;
+		}
+		unset( $value[ self::TUNED ] );
+		return $value;
 	}
 
 	/** Purge the home page? Off for shops whose home page shows no prices or stock. */

@@ -75,6 +75,44 @@ if ( $amp_plugin ) {
 } else {
 	gpwt( 'AMP "purges" off (no AMP plugin; GridPane\'s fork fetches the /amp/ page instead of purging it)', 0 === ( $nginx_helper_admin->options['purge_amp_urls'] ?? null ), 'purge_amp_urls=' . var_export( $nginx_helper_admin->options['purge_amp_urls'] ?? null, true ) );
 }
+// Nginx Helper saves its whole in-memory options (Preload Cache on admin_init, scheduled posts).
+// Run the filters of such a save on a copy and look at what would be written; nothing is saved.
+$stored   = get_site_option( 'rt_wp_nginx_helper_options' );
+$defaults = $nginx_helper_admin->nginx_helper_default_settings();
+$trimmed  = array( 'purge_feeds' );
+if ( ! $amp_plugin ) {
+	$trimmed[] = 'purge_amp_urls';
+}
+$real   = array();
+$values = array();
+foreach ( $trimmed as $k ) {
+	$real[ $k ] = is_array( $stored ) && array_key_exists( $k, $stored ) ? $stored[ $k ] : $defaults[ $k ];
+	$values[]   = $k . '=' . var_export( $real[ $k ], true );
+}
+$save_filters = static function ( $value ) use ( $stored ) {
+	$value = apply_filters( 'pre_update_site_option_rt_wp_nginx_helper_options', $value, $stored, 'rt_wp_nginx_helper_options', get_current_network_id() );
+	return apply_filters( 'pre_update_option_rt_wp_nginx_helper_options', $value, $stored, 'rt_wp_nginx_helper_options' );
+};
+$memory                       = $nginx_helper_admin->options;
+$memory['is_cache_preloaded'] = true;   // what Preload Cache changes before it saves
+$saved                        = $save_filters( $memory );
+$got                          = array_intersect_key( (array) $saved, $real );
+$mark                         = defined( 'GP_Woo_Purge::TUNED' ) ? GP_Woo_Purge::TUNED : '-';
+gpwt(
+	'Preload Cache saving the in-memory options -> trimmed keys keep their ' . ( is_array( $stored ) ? 'stored' : 'default (nothing stored)' ) . ' values (' . implode( ', ', $values ) . ')',
+	is_array( $saved ) && $got == $real && ! isset( $saved[ $mark ] ),
+	'would save: ' . var_export( $got, true ) . ( isset( $saved[ $mark ] ) ? ' + ' . $mark : '' )
+);
+unset( $memory[ $mark ] );
+gpwt( "...and Nginx Helper's other values as they are (is_cache_preloaded=true)", is_array( $saved ) && array_diff_key( $saved, $real ) === array_diff_key( $memory, $real ) );
+gpwt( '...while the trimming stays on in memory', 0 === $nginx_helper_admin->options['purge_feeds'] );
+$admin = wp_parse_args( is_array( $stored ) ? $stored : array(), $defaults );   // the settings page / wp-cli: no marker
+foreach ( $trimmed as $k ) {
+	$admin[ $k ] = 0;
+}
+$saved = $save_filters( $admin );
+gpwt( 'a real change (settings page / wp-cli: ' . implode( '=0, ', $trimmed ) . '=0) is saved as it is', $saved === $admin, var_export( array_intersect_key( (array) $saved, $real ), true ) );
+
 foreach ( array( 'edit_term', 'delete_term' ) as $hook ) {
 	gpwt(
 		"$hook: Nginx Helper's handler replaced by the add-on's",
