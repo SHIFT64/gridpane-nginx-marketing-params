@@ -36,6 +36,23 @@ FROM_CACHE = ("HIT", "STALE", "UPDATING", "REVALIDATED")
 REDIS_SOCK = "/var/run/redis-page/redis-page.sock"
 
 
+def http_auth_any(site):
+    """GridPane's HTTP auth / IP allowlist (an included acl*.conf with "satisfy any") is on."""
+    try:
+        with open("/etc/nginx/sites-available/%s" % site) as f:
+            v = f.read()
+    except OSError:
+        return False
+    for inc in re.findall(r"^\s*include\s+(\S*acl\S*\.conf)\s*;", v, re.M):
+        try:
+            with open(inc) as f:
+                if re.search(r"^\s*satisfy\s+any\s*;", f.read(), re.M):
+                    return True
+        except OSError:
+            pass
+    return False
+
+
 def cache_type(site):
     try:
         with open("/etc/nginx/sites-available/%s" % site) as f:
@@ -171,6 +188,10 @@ def main():
         return 1
 
     print(c("1", "\nCache behaviour on https://%s%s (%s page cache)" % (a.site, path, "Redis" if ctype == "redis" else "FastCGI")))
+    if ctype == "redis" and http_auth_any(a.site):
+        print(c("33", "  GridPane's HTTP auth / IP allowlist is on (acl.conf, \"satisfy any\"): nginx skips the Redis\n"
+                      "  cache lookup for every request, so the cache checks below cannot pass while it is on.\n"
+                      "  The parameter handling and the Redis entries are still checked. See README."))
     sep = "&" if "?" in path else "?"
     if a.fresh:
         if rds:

@@ -144,6 +144,18 @@ cache_type() {                   # fcgi | redis | "" (no page cache, proxy, or n
   if grep -qs -- "-wpfc.conf" "$v"; then echo fcgi; elif [[ -n "$(redis_tpl "$1")" ]]; then echo redis; fi
 }
 switch_type() { [[ -e "$1" ]] || return 0; if grep -qs 'php-context-redis' "$1"; then echo redis; else echo fcgi; fi; }
+# GridPane's HTTP auth / IP allowlist (common/acl.conf) uses "satisfy any": nginx leaves the access
+# phase at the first check that passes, so srcache's cache lookup (always last in that phase) never
+# runs. A Redis site behind it is never served from the cache (FastCGI is not affected).
+http_auth_any() {
+  local f
+  for f in $(sed -nE 's#^[[:space:]]*include[[:space:]]+([^;[:space:]]*acl[^;[:space:]]*\.conf)[[:space:]]*;.*#\1#p' \
+             "/etc/nginx/sites-available/$1" 2>/dev/null); do
+    if grep -qsE '^[[:space:]]*satisfy[[:space:]]+any[[:space:]]*;' "$f"; then return 0; fi
+  done
+  return 1
+}
+HTTP_AUTH_NOTE="GridPane's HTTP auth / IP allowlist is on: the Redis cache is never read while it is (see README)"
 first_line() { awk -v p="$1" 'index($0, p) { print NR; exit }' "$2"; }   # never fails (set -e/ERR safe)
 site_of() {                      # the site name a flag or switch carries ("" = a file of an older version)
   sed -nE 's/^[[:space:]]*set \$gp_mkt_(fcgi|redis|sw)[[:space:]]+"([fr]:)?([^"]*)";.*/\3/p' "$1" 2>/dev/null | head -1
@@ -295,6 +307,7 @@ enable_site() {
     put_site "$SRC_SWITCH_REDIS" "$s" "$SWITCH"
     del "/var/www/$s/nginx/$FLAG"
     echo "ON  for $s (Redis)"
+    if http_auth_any "$s"; then echo "    note: $HTTP_AUTH_NOTE"; fi
   fi
 }
 
@@ -392,6 +405,7 @@ status() {
     if [[ $t == fcgi && ( -e /etc/nginx/common/_custom/wpfc.conf || -e "/etc/nginx/common/_custom/$s-wpfc.conf" ) ]] \
        || [[ $t == redis && ( -e /etc/nginx/common/_custom/wp-redis.conf || -e "/etc/nginx/common/_custom/$s-wp-redis.conf" ) ]]; then
       echo "  $s   (a common/_custom template override exists; its hooks were checked)"; fi
+    if [[ $t == redis ]] && http_auth_any "$s"; then echo "  $s   (Redis; $HTTP_AUTH_NOTE)"; continue; fi
     echo "  $s   ($([[ $t == fcgi ]] && echo FastCGI || echo Redis))"
   done
   echo "WooCommerce purge add-on (mu-plugins/$WOO_NAME):"
