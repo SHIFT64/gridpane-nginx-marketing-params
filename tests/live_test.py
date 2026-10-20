@@ -5,24 +5,76 @@ Live smoke test of an installed site, run ON the GridPane server.
   ./test.sh live example.com            test the home page
   ./test.sh live example.com /about/    test a specific page (best: a normal page with a
                                         trailing slash -> the redirect check runs too)
+  ./test.sh live example.com /about/ --fresh
+                                        purge that one page first, so the first marketing
+                                        request is rendered by PHP (cache-poisoning check)
 
+Works for FastCGI and Redis page cache (detected from the site's vhost).
 Talks to the local nginx (127.0.0.1:443, SNI = the site), so no proxy/CDN in front is involved.
 Only GET requests. The first request may create the normal cache entry of the page (exactly
-what a visitor would do). The last check sends one purge request the way WordPress does
-(the site's hostname via normal DNS) for a URL that is never cached, so it purges nothing.
+what a visitor would do). FastCGI: the last check sends one purge request the way WordPress
+does (the site's hostname via normal DNS) for a URL that is never cached, so it purges nothing.
+Redis: the entries are also checked in the site's own Redis database (read-only, with the
+credentials nginx uses; --fresh deletes the page's one entry).
 """
 import argparse
 import http.client
 import os
 import random
+import re
 import socket
 import ssl
 import string
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sandbox_test import Resp  # noqa: E402
+
 COLOR = sys.stdout.isatty()
 # served from the cache (UPDATING/STALE = expired entry served while nginx refreshes it in the background)
 FROM_CACHE = ("HIT", "STALE", "UPDATING", "REVALIDATED")
+REDIS_SOCK = "/var/run/redis-page/redis-page.sock"
+
+
+def cache_type(site):
+    try:
+        with open("/etc/nginx/sites-available/%s" % site) as f:
+            v = f.read()
+    except OSError:
+        return None, None
+    m = re.search(r"include (/etc/nginx/common/\S+-wp-redis\.conf);", v)
+    if m:
+        return "redis", m.group(1)
+    return ("fcgi", None) if "-wpfc.conf" in v else (None, None)
+
+
+class SiteRedis:
+    """The site's page-cache database, opened the way nginx's /redis-store location does."""
+
+    def __init__(self, tpl):
+        with open(tpl) as f:
+            t = f.read()
+        self.db = int(re.search(r"redis2_query select (\d+);", t).group(1))
+        self.prefix = re.search(r'^\s*set \$key "([A-Za-z0-9_-]+:)\$scheme', t, re.M).group(1)
+        auth = re.search(r"redis2_query auth ([^;]+);", t).group(1).split()
+        self.r = Resp.__new__(Resp)
+        self.r.s = socket.socket(socket.AF_UNIX)
+        self.r.s.settimeout(5)
+        self.r.s.connect(REDIS_SOCK)
+        self.r.f = self.r.s.makefile("rb")
+        self.r.cmd("AUTH", *auth)
+        self.r.cmd("SELECT", self.db)
+
+    def key(self, host, path):
+        return "%shttpsGET%s%s" % (self.prefix, host, path)
+
+    def scan(self, pattern):
+        out, cur = [], "0"
+        while True:
+            cur, keys = self.r.cmd("SCAN", cur, "MATCH", pattern, "COUNT", 1000)
+            out += keys
+            if cur == "0":
+                return out
 
 
 def c(code, s):
@@ -63,11 +115,19 @@ class Live:
             self.failed.append(name)
             info = ""
             if h is not None:
-                info = "status=%s x-grid-cache=%s skip=%s mkt=%s location=%s" % (
-                    h.get(":status"), h.get("x-grid-cache"), h.get("x-grid-cache-skip"),
-                    h.get("x-grid-cache-mkt"), h.get("location"))
+                info = "status=%s cache=%s skip=%s mkt=%s location=%s" % (
+                    h.get(":status"), cache(h), skip(h), h.get("x-grid-cache-mkt"), h.get("location"))
             print("  " + c("31", "FAIL") + " " + name + ("\n       " + info if info else "") +
                   ("\n       " + extra if extra else ""))
+
+
+def cache(h):
+    """X-Grid-Cache (FastCGI) or X-Grid-SRCache-Fetch (Redis)."""
+    return h.get("x-grid-cache") or h.get("x-grid-srcache-fetch")
+
+
+def skip(h):
+    return h.get("x-grid-cache-skip") or h.get("x-grid-srcache-skip")
 
 
 def main():
@@ -75,43 +135,78 @@ def main():
     ap.add_argument("site")
     ap.add_argument("path", nargs="?", default="/")
     ap.add_argument("--ip", default="127.0.0.1", help="origin IP (default 127.0.0.1)")
+    ap.add_argument("--fresh", action="store_true", help="purge the tested page first (one entry)")
     a = ap.parse_args()
     path = a.path if a.path.startswith("/") else "/" + a.path
     T = Live(a.site, a.ip)
     tok = "gpmkt" + "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(10))
+    ctype, tpl = cache_type(a.site)
 
     print(c("1", "Installation"))
+    T.check("site uses GridPane FastCGI or Redis page cache (%s)" % (ctype or "neither"), ctype is not None)
     eng = os.path.exists("/etc/nginx/marketing-params/engine.conf")
     T.check("engine installed (/etc/nginx/marketing-params/)", eng)
-    enabled = True
-    for f in ("marketing-params-php-context.conf", "marketing-params-skip-fcgi-cache-context.conf"):
+    enabled = ctype is not None
+    flag = "marketing-params-skip-%s-cache-context.conf" % ("redis" if ctype == "redis" else "fcgi")
+    for f in ("marketing-params-php-context.conf", flag):
         present = os.path.exists("/var/www/%s/nginx/%s" % (a.site, f))
         enabled = enabled and present
         T.check("site file present (/var/www/%s/nginx/%s)" % (a.site, f), present)
+    if ctype == "redis" and enabled:
+        with open("/var/www/%s/nginx/marketing-params-php-context.conf" % a.site) as f:
+            redis_switch = "php-context-redis" in f.read()
+        T.check("the switch is the Redis variant", redis_switch)
+        enabled = redis_switch
+    rds = None
+    if ctype == "redis" and enabled:
+        try:
+            rds = SiteRedis(tpl)
+            print("  site's page cache: Redis db %d, key prefix %s" % (rds.db, rds.prefix))
+        except Exception as e:
+            print(c("33", "  cannot open the site's Redis database (%s): key checks skipped" % e.__class__.__name__))
     if not (eng and enabled):
         print("\n" + c("33", "The site is not enabled, so the cache tests would only show stock GridPane behaviour."))
         print("Run:  ./install.sh %s   (it prints the reason if it has to skip the site)" % a.site)
         print("then: ./test.sh live %s %s" % (a.site, path))
         return 1
 
-    print(c("1", "\nCache behaviour on https://%s%s" % (a.site, path)))
+    print(c("1", "\nCache behaviour on https://%s%s (%s page cache)" % (a.site, path, "Redis" if ctype == "redis" else "FastCGI")))
     sep = "&" if "?" in path else "?"
+    if a.fresh:
+        if rds:
+            n = rds.r.cmd("DEL", rds.key(a.site, path))
+            print("  --fresh: deleted %d entry (%s)" % (n, rds.key(a.site, path)))
+        elif ctype == "fcgi":
+            st = T.get("/purge" + path)[0][":status"]
+            print("  --fresh: GET /purge%s -> %s" % (path, st))
     h, body = T.get("%s%sgclid=%s&utm_source=%s" % (path, sep, tok, tok))
     if h[":status"] in (301, 302) and h.get("location"):
         T.check("page answered with a redirect - pick a final URL (e.g. with trailing slash)", False, h)
     T.check("marketing-only URL is not skipped (X-Grid-Cache-Mkt: ignored)",
-            h.get("x-grid-cache-mkt") == "ignored" and h.get("x-grid-cache") != "BYPASS", h)
-    T.check("param values are not baked into the HTML", tok not in body, h)
+            h.get("x-grid-cache-mkt") == "ignored" and cache(h) != "BYPASS", h)
+    if a.fresh:
+        T.check("first request after the purge is rendered by PHP (MISS)", cache(h) == "MISS", h)
+    T.check("param values are not baked into the HTML%s" % ("" if cache(h) == "MISS" else " (page came from the cache: use --fresh for a real check)"),
+            tok not in body, h)
     h2, _ = T.get("%s%sgclid=%sB&fbclid=%s" % (path, sep, tok, tok))
-    T.check("another marketing variant -> served from cache (HIT)", h2.get("x-grid-cache") in FROM_CACHE, h2)
-    h3, _ = T.get(path)
-    T.check("clean URL -> served from the same cache entry (HIT)", h3.get("x-grid-cache") in FROM_CACHE, h3)
+    T.check("another marketing variant -> served from cache (HIT)", cache(h2) in FROM_CACHE, h2)
+    h3, body3 = T.get(path)
+    T.check("clean URL -> served from the same cache entry (HIT)", cache(h3) in FROM_CACHE, h3)
+    if a.fresh:
+        T.check("...and the clean visitor gets no param value either", tok not in body3, h3)
     h4, _ = T.get("%s%sgp_mkt_probe=%s" % (path, sep, tok))
     T.check("non-marketing param -> stock BYPASS -query_string",
-            h4.get("x-grid-cache") == "BYPASS" and "-query_string" in (h4.get("x-grid-cache-skip") or "")
+            cache(h4) == "BYPASS" and "-query_string" in (skip(h4) or "")
             and "x-grid-cache-mkt" not in h4, h4)
     h5, _ = T.get("%s%sgclid=%s&gp_mkt_probe=1" % (path, sep, tok))
-    T.check("marketing + non-marketing param -> stock BYPASS", h5.get("x-grid-cache") == "BYPASS", h5)
+    T.check("marketing + non-marketing param -> stock BYPASS", cache(h5) == "BYPASS", h5)
+    if rds:
+        print(c("1", "\nRedis entries (db %d)" % rds.db))
+        k = rds.key(a.site, path)
+        T.check("the page is stored under its clean stock key %s" % k, rds.r.cmd("EXISTS", k) == 1)
+        found = rds.scan("*%s*" % tok)
+        T.check("no entry was stored under a marketing URL (no key contains the test token)", not found,
+                extra=" ".join(found[:3]))
 
     print(c("1", "\nRedirects keep the params"))
     if path != "/" and path.endswith("/") and "?" not in path:
@@ -130,6 +225,10 @@ def main():
     except Exception as e:
         print("  skip www check (%s)" % e.__class__.__name__)
 
+    if ctype == "redis":
+        print(c("1", "\nPurge"))
+        print("  skip HTTP purge check: with Redis page cache Nginx Helper deletes keys in Redis directly")
+        return finish(T)
     # Nginx Helper sends GET https://<site>/purge/<path> through normal DNS (often the public IP),
     # not to 127.0.0.1. If Basic Auth or an IP allowlist answers it, no purge ever works.
     print(c("1", "\nPurge requests reach this nginx (the way WordPress sends them)"))
@@ -152,6 +251,10 @@ def main():
         T.check("GET %s via %s (%s) -> 412/200 (not blocked)" % (probe, a.site, ip), False,
                 extra="%s: %s" % (e.__class__.__name__, e))
 
+    return finish(T)
+
+
+def finish(T):
     total = T.passed + len(T.failed)
     print()
     if T.failed:
