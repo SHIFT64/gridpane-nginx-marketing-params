@@ -80,6 +80,8 @@ class Root:
             os.makedirs(d, exist_ok=True)
         shutil.copy("/etc/nginx/fastcgi_params", self.etc)
         shutil.copy("/etc/nginx/common/basics.conf", os.path.join(self.etc, "common"))
+        # GridPane's HTTP auth / IP allowlist, reduced to its access rules
+        write(os.path.join(self.etc, "common/acl.conf"), "satisfy any;\nallow 127.0.0.1;\ndeny all;\n")
         fc = read("/etc/nginx/conf.d/fastcgi.conf")
         fc = re.sub(r"fastcgi_cache_path\s+\S+", "fastcgi_cache_path %s/cache" % self.d, fc)
         write(os.path.join(self.etc, "conf.d/fastcgi.conf"), self.relocate(fc))
@@ -97,7 +99,7 @@ class Root:
               % ("\n".join("load_module /etc/nginx/modules/%s.so;" % m for m in REDIS_MODULES),
                  self.d, self.d, self.d, self.d, self.d, self.d, self.d, self.etc, self.etc))
 
-    def vhost(self, s, kind, db=2, mutate=None, tmutate=None):
+    def vhost(self, s, kind, db=2, mutate=None, tmutate=None, acl=False):
         """(Re)render site s the way GridPane does: kind = fcgi | redis | redis-legacy | php.
         mutate: changes the Redis template / the FastCGI key file; tmutate: the FastCGI template."""
         os.makedirs("%s/%s/nginx" % (self.www, s), exist_ok=True)
@@ -137,7 +139,8 @@ class Root:
         t = self.relocate(t)
         write(os.path.join(common, name), t)
         v = "server {\n    listen 127.0.0.1:8;\n    server_name %s;\n    root %s/%s/htdocs;\n" \
-            "    set $sockfile php;\n    include %s/%s;\n}\n" % (s, self.www, s, common, name)
+            "    set $sockfile php;\n%s    include %s/%s;\n}\n" % (
+                s, self.www, s, ("    include %s/acl.conf;\n" % common) if acl else "", common, name)
         write(os.path.join(self.etc, "sites-available", s), v)
         write(os.path.join(self.etc, "sites-enabled", s), v)
 
@@ -249,6 +252,22 @@ def scenarios(T):
     rc, out = T.run("--status")
     T.check("--status: OK, lists both types", rc == 0 and "redis.test   (Redis)" in out
             and "fcgi.test   (FastCGI)" in out and "status: OK" in out, out[-1200:])
+
+    T.vhost("auth.test", "redis", 7, acl=True)
+    T.vhost("authfc.test", "fcgi", acl=True)
+    rc, out = T.run("auth.test", "authfc.test")
+    T.clean_run("sites behind GridPane's HTTP auth / IP allowlist", rc, out)
+    T.check("Redis site behind HTTP auth: switched on, with a note that Redis is never read while it is on",
+            named("auth.test", "redis") and "ON  for auth.test (Redis)" in out
+            and "note: GridPane's HTTP auth / IP allowlist is on" in out, out[-800:])
+    T.check("FastCGI site behind HTTP auth: switched on, no note (FastCGI is not affected)",
+            named("authfc.test", "fcgi")
+            and not any("authfc.test" in l and "HTTP auth" in l for l in out.splitlines()), out[-800:])
+    rc, out = T.run("--status")
+    T.check("--status: notes HTTP auth on the Redis site, still OK", rc == 0 and "status: OK" in out
+            and "auth.test   (Redis; GridPane's HTTP auth / IP allowlist is on" in out
+            and "authfc.test   (FastCGI)" in out, out[-1200:])
+    T.run("--disable", "auth.test", "authfc.test")
 
     T.section("3. Re-running the same install changes nothing")
     before = T.snapshot()
