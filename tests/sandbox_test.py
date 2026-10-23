@@ -954,6 +954,34 @@ def run_matrix(R):
     R.check("off.example redirect untouched", h.get("location") == "https://%s/noslash/?gclid=1" % OFF_HOST,
             "loc=%r" % h.get("location"))
 
+    # ------------------------------------------------------------------
+    R.section("10. REST API is never cached (GridPane's own skip rule leaves /wp-json/ cacheable)")
+
+    def is_rest_bypass(h, target):
+        return (h.get("x-grid-cache") == "BYPASS" and "-rest_api" in (h.get("x-grid-cache-skip") or "")
+                and "x-grid-cache-mkt" not in h and h.get("x-test-uri") == target)
+
+    for t in ["/wp-json/", "/wp-json", "/wp-json/wc/store/v1/cart", "/WP-JSON/wp/v2/posts", "/wp%2Djson/wp/v2/posts",
+              "/wp-json%2Fwp/v2/posts", "//wp-json/wp/v2/posts"]:
+        get(t)
+        h, _ = get(t)
+        R.check("%s -> BYPASS -rest_api twice (never stored)" % t, is_rest_bypass(h, t), summary(h))
+    for t in ["/wp-json/wc/store/v1/cart?gclid=1", "/wp-json/?utm_source=x&fbclid=1"]:
+        h, _ = get(t)
+        R.check("%s -> marketing params NOT ignored on the REST API, PHP sees original" % t,
+                is_rest_bypass(h, t) and "-query_string" in (h.get("x-grid-cache-skip") or ""), summary(h))
+    R.purge("/wp-jsonx/")
+    get("/wp-jsonx/")
+    h, _ = get("/wp-jsonx/")
+    R.check("/wp-jsonx/ (not the REST API) is cached normally", h.get("x-grid-cache") == "HIT", summary(h))
+    R.purge("/a/wp-json/")
+    get("/a/wp-json/")
+    h, _ = get("/a/wp-json/")
+    R.check("/a/wp-json/ (not at the root) is cached normally", h.get("x-grid-cache") == "HIT", summary(h))
+    h, _ = get("/wp-json/", host=OFF_HOST)
+    R.check("site without the switch: /wp-json/ stock (no -rest_api)",
+            "-rest_api" not in (h.get("x-grid-cache-skip") or ""), summary(h))
+
 
 MKT_IN_KEY = re.compile(r"[?&](?:gclid|utm_|fbclid|msclkid|gad_|gbraid|wbraid|_gl=|hsa_|mtm_|pk_|ttclid)", re.I)
 

@@ -33,6 +33,44 @@ global $nginx_purger, $nginx_helper_admin;
 gpwt_out( 'Setup' );
 gpwt( 'mu-plugin loaded (GP_Woo_Purge ' . ( defined( 'GP_Woo_Purge::VERSION' ) ? GP_Woo_Purge::VERSION : '-' ) . ')', class_exists( 'GP_Woo_Purge' ) );
 gpwt( 'WooCommerce active', class_exists( 'WooCommerce' ) );
+
+// Never-cached pages: the decision for the cart / checkout / account page (whatever their slug)
+// and for an ordinary page, read through the add-on's filter. Works for any cache type.
+gpwt_out( '' );
+gpwt_out( 'Never-cached WooCommerce pages (Do-Not-Cache)' );
+if ( method_exists( 'GP_Woo_Purge', 'never_cache_woo_pages' ) ) {
+	$gpwt_decision = null;
+	$gpwt_spy      = static function ( $v ) use ( &$gpwt_decision ) {
+		$gpwt_decision = (bool) $v;
+		return false;   // decided, but never send a header from the test
+	};
+	add_filter( 'gp_woo_never_cache_page', $gpwt_spy, PHP_INT_MAX );
+	$gpwt_pages = array( 'cart' => true, 'checkout' => true, 'myaccount' => true );
+	$gpwt_plain = get_posts( array( 'post_type' => 'page', 'post_status' => 'publish', 'numberposts' => 1, 'fields' => 'ids', 'post__not_in' => array_map( 'wc_get_page_id', array_keys( $gpwt_pages ) ) ) );
+	if ( $gpwt_plain ) {
+		$gpwt_pages[ 'page:' . $gpwt_plain[0] ] = false;
+	}
+	foreach ( $gpwt_pages as $gpwt_key => $gpwt_want ) {
+		$gpwt_id = 0 === strpos( $gpwt_key, 'page:' ) ? (int) substr( $gpwt_key, 5 ) : wc_get_page_id( $gpwt_key );
+		if ( $gpwt_id <= 0 ) {
+			gpwt_out( '  SKIP ' . $gpwt_key . ' (no page assigned)' );
+			continue;
+		}
+		query_posts( array( 'page_id' => $gpwt_id ) );
+		$gpwt_decision = null;
+		GP_Woo_Purge::never_cache_woo_pages();
+		gpwt(
+			$gpwt_key . ' ' . wp_make_link_relative( get_permalink( $gpwt_id ) ) . ' -> ' . ( $gpwt_want ? 'Do-Not-Cache' : 'cacheable' ),
+			$gpwt_want === $gpwt_decision,
+			'decision=' . var_export( $gpwt_decision, true )
+		);
+	}
+	wp_reset_query();
+	remove_filter( 'gp_woo_never_cache_page', $gpwt_spy, PHP_INT_MAX );
+} else {
+	gpwt( 'add-on has never_cache_woo_pages() (0.4.0+)', false );
+}
+gpwt_out( '' );
 gpwt( 'Nginx Helper active with purge enabled', is_object( $nginx_purger ) && ! empty( $nginx_helper_admin->options['enable_purge'] ) );
 $method = $nginx_helper_admin->options['cache_method'] ?? '';
 gpwt( 'cache method is FastCGI (the only one this test can neutralise)', 'enable_fastcgi' === $method, 'cache_method=' . $method );
