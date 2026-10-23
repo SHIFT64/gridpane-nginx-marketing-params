@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: WooCommerce purge for Nginx Helper
- * Description: Purges the page cache of a product, its archives, the shop page and the home page when WooCommerce changes a price or a stock status without a post update (orders, REST API, imports, bulk edit, scheduled sales). Trims Nginx Helper's own purges: no orders/coupons, no feeds, no AMP fetches, one home-page purge per request for term edits, all sent after the response. Installed by gridpane-nginx-marketing-params.
- * Version: 0.3.1
+ * Description: Keeps the cart, checkout and account pages out of the GridPane page cache whatever their slug. Purges the page cache of a product, its archives, the shop page and the home page when WooCommerce changes a price or a stock status without a post update (orders, REST API, imports, bulk edit, scheduled sales). Trims Nginx Helper's own purges: no orders/coupons, no feeds, no AMP fetches, one home-page purge per request for term edits, all sent after the response. Installed by gridpane-nginx-marketing-params.
+ * Version: 0.4.0
  * Requires PHP: 7.4
  *
  * Why: Nginx Helper purges on `transition_post_status`, i.e. only when WordPress updates the post.
@@ -18,12 +18,20 @@
  *   - term edits: every edit_term purged the home page + feeds, e.g. 4 requests per category
  *     during a category import; now it is one home-page purge per request (or none, see below).
  *
+ * Never cached: the cart, checkout and account pages send `Do-Not-Cache: 1`, which GridPane's
+ * FastCGI and Redis templates honour ($upstream_http_do_not_cache). Their own skip rule only knows
+ * /cart/, /checkout/ and /my-account/, so /koszyk/, /zamowienie/, /konto/... were cached: a guest
+ * got another guest's stored cart page with its nonces. WordPress knows the page whatever its slug
+ * or language, so the decision is made here, not in nginx.
+ *
  * Settings:
  *   option gp_woo_purge_home = "no"   do not purge the home page (product changes, term edits);
  *                                      for shops whose home page lists no prices or stock.
  *                                      gp wp <site> option update gp_woo_purge_home no
  *
  * Filters:
+ *   gp_woo_never_cache_page           bool   send Do-Not-Cache on this page (default: cart, checkout,
+ *                                            account page, or DONOTCACHEPAGE defined by any plugin)
  *   gp_woo_purge_home                 bool   purge the home page (default: the option above)
  *   gp_woo_purge_disable_feed_purges  bool   stop Nginx Helper purging feeds (default true)
  *   gp_woo_purge_disable_amp_purges   bool   stop Nginx Helper's AMP fetches (default: no AMP plugin)
@@ -39,7 +47,7 @@ defined( 'ABSPATH' ) || exit;
 
 final class GP_Woo_Purge {
 
-	const VERSION = '0.3.1';
+	const VERSION = '0.4.0';
 
 	/** Key in Nginx Helper's in-memory options: the real values of the keys trimmed here. Never saved. */
 	const TUNED = '_gp_woo_purge_tuned';
@@ -57,7 +65,25 @@ final class GP_Woo_Purge {
 		add_action( 'added_post_meta', array( __CLASS__, 'on_meta_changed' ), 10, 3 );
 		add_action( 'updated_post_meta', array( __CLASS__, 'on_meta_changed' ), 10, 3 );
 		add_action( 'shutdown', array( __CLASS__, 'on_shutdown' ), PHP_INT_MAX );
+		add_action( 'template_redirect', array( __CLASS__, 'never_cache_woo_pages' ), PHP_INT_MAX );
 		self::tune_nginx_helper();
+	}
+
+	/**
+	 * Cart, checkout (incl. order received) and account pages tell nginx not to store them.
+	 * Runs after WooCommerce's own WC_Cache_Helper::prevent_caching() (hooked on `wp`), which
+	 * defines DONOTCACHEPAGE on these pages; other plugins' DONOTCACHEPAGE is honoured too.
+	 */
+	public static function never_cache_woo_pages() {
+		if ( headers_sent() ) {
+			return;
+		}
+		$woo = ( function_exists( 'is_cart' ) && is_cart() )
+			|| ( function_exists( 'is_checkout' ) && is_checkout() )
+			|| ( function_exists( 'is_account_page' ) && is_account_page() );
+		if ( apply_filters( 'gp_woo_never_cache_page', $woo || ( defined( 'DONOTCACHEPAGE' ) && DONOTCACHEPAGE ) ) ) {
+			header( 'Do-Not-Cache: 1' );
+		}
 	}
 
 	/**

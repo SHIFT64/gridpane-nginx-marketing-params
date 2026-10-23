@@ -133,28 +133,43 @@ map "$gp_mkt_fcgi|$gp_mkt_redis|$gp_mkt_sw|$gp_mkt_rpre" $gp_mkt_ok {
     default        "";
 }
 
+# ---- REST API: never cached on an enabled site. GridPane's skip rules leave /wp-json/
+# cacheable (FastCGI and Redis), so a guest's WooCommerce Store API cart and its nonce
+# could be served to everyone. Raw path from $request_uri: WordPress also routes
+# /wp%2Djson/... and //wp-json/... to the REST API. `?rest_route=` already bypasses
+# (real query param) and /index.php/... is in GridPane's own skip rule.
+map "$gp_mkt_ok|$gp_mkt_path" $gp_mkt_rest {
+    volatile;
+    "~*^1\|/++wp(?:-|%2d)json(?:/|%2f|$)"  "1";
+    default  "";
+}
+
 # ---- decision, evaluated in the php location (after every server-level skip
 # rule and every rewrite). php-context.conf sets
-#   $gp_mkt_in = "$gp_mkt_ok|$skip_reason|$request_method|$gp_mkt_qs#$args"
+#   $gp_mkt_in = "$gp_mkt_ok$gp_mkt_rest|$skip_reason|$request_method|$gp_mkt_qs#$args"
 # Un-skip only if: the vhost is a GridPane FastCGI- or Redis-cache vhost of an
-# enabled site (see $gp_mkt_ok), GridPane's ONLY skip reason is the query string,
-# GET/HEAD, $args are still the original query ('#' never occurs in $args), and
-# every param is on the list.
+# enabled site (see $gp_mkt_ok), the path is not the REST API ($gp_mkt_rest makes
+# the prefix "11"), GridPane's ONLY skip reason is the query string, GET/HEAD,
+# $args are still the original query ('#' never occurs in $args), and every param
+# is on the list.
 map $gp_mkt_in $gp_mkt_verdict {
     volatile;
     "~^1\|-query_string\|(?:GET|HEAD)\|(?<gpmkt_q>[^#]*+)#\k<gpmkt_q>$"  $gp_mkt_allmkt;
     default  "";
 }
 
-# New $skip_cache / $skip_reason: changed only when un-skipped.
-map $gp_mkt_unskip $gp_mkt_skip_cache {
+# New $skip_cache / $skip_reason: skipped for the REST API, cleared when un-skipped
+# (the two never meet: the REST API is never un-skipped), GridPane's otherwise.
+map "$gp_mkt_rest|$gp_mkt_unskip" $gp_mkt_skip_cache {
     volatile;
-    "1"      "0";
+    "~^1\|"  "1";
+    "|1"     "0";
     default  $gp_mkt_sc;
 }
-map $gp_mkt_unskip $gp_mkt_skip_reason {
+map "$gp_mkt_rest|$gp_mkt_unskip" $gp_mkt_skip_reason {
     volatile;
-    "1"      "";
+    "~^1\|"  "$gp_mkt_sr-rest_api";
+    "|1"     "";
     default  $gp_mkt_sr;
 }
 # Cache key URI: clean path (== stock key of the clean URL) or stock $request_uri.

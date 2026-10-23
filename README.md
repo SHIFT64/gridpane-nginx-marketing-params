@@ -18,6 +18,7 @@ example.com/about-us/
 - **WordPress redirects keep the parameters.** This covers missing trailing `/`, www → apex, canonical redirects and 404 URL guessing: nginx re-appends the original marketing parameters to `Location` (same host only).
 - **Purge is unchanged.** The clean URL's key is byte-identical to stock GridPane's, so Nginx Helper (FastCGI: `/purge/<path>`; Redis: `DEL` of the URL's key) and GridPane's own purge also clear the gclid/utm variants.
 - **Pure nginx** (`map` + PCRE). No Lua or njs, and no GridPane-managed file is edited.
+- **Never cached, whatever GridPane's templates say:** the REST API (`/wp-json/…`, nginx engine) and WooCommerce's cart, checkout and account pages under any slug (`/koszyk/`, `/konto/`…, [WooCommerce add-on](#woocommerce-purge-add-on)). See [Never cached](#never-cached-rest-api-and-woocommerce-pages).
 
 ## Installation
 
@@ -215,6 +216,14 @@ The engine only accepts a flag and a switch of the same site and the same cache 
 - **Stray copies are ignored.** Files like `engine.old.conf` or `php-context.orig.conf` are not loaded. A missing `params.list` means "nothing counts as marketing".
 - **Long queries cost nothing.** Above 2048 bytes (or with a path longer than 8 KB) the chain does not run. It also stops at the first parameter that is not on the list.
 
+## Never cached: REST API and WooCommerce pages
+
+GridPane's skip rule (FastCGI and Redis templates) knows only `/cart`, `/checkout`, `/my-account` and leaves `/wp-json/` cacheable. On a shop with other slugs, or for the Store API, a guest's cart page or `/wp-json/wc/store/v1/cart` (with its nonce) was stored and served to every next guest without cookies. Found live on a Redis site whose cart is `/koszyk/` (stored in Redis) and on one whose REST responses were cached.
+
+- **REST API, in the engine.** On an enabled site every request whose raw path starts with `/wp-json` (also `/WP-JSON`, `/wp%2Djson`, `//wp-json`) is skipped with the reason `-rest_api` (`X-Grid-SRCache-Skip` / `X-Grid-Cache-Skip`), and marketing params are never ignored there (`/wp-json/…?gclid=1` stays a BYPASS and PHP sees the original). `?rest_route=…` already bypasses as a real query param, `/index.php/…` is in GridPane's own rule. A site that moved the REST prefix (`rest_url_prefix` filter) is not covered. Sites without the switch keep stock behaviour.
+- **WooCommerce pages, in the add-on (0.4.0+).** Only WordPress knows which page is the cart, whatever its slug or language. On `template_redirect` the add-on sends `Do-Not-Cache: 1` when `is_cart()`, `is_checkout()` (incl. order received), `is_account_page()` or any plugin defined `DONOTCACHEPAGE` (WooCommerce does on these pages). GridPane's FastCGI (`fastcgi_no_cache`) and Redis (`srcache_store_skip`) templates both honour `$upstream_http_do_not_cache`, so the page is never stored. Filter: `gp_woo_never_cache_page`. The add-on does not depend on the nginx switch.
+- **Existing entries are not removed.** After installing, purge the cart/checkout/account URLs once (or the whole site's cache).
+
 ## Limitations and behaviour worth knowing
 
 - **Skip rules without a reason.** A rule that sets `$skip_cache 1` **without** setting or appending `$skip_reason` is overridden for marketing-only URLs. Always give a reason: `set $skip_reason "${skip_reason}-my_reason";`.
@@ -268,6 +277,8 @@ On a live shop (WooCommerce 11.1, HPOS off, 5 days of logs): 53 products and 22 
 | variation changes | its parent product (and the parent's archives) |
 | order, refund or coupon saved / status changed / note added | nothing any more (excluded from Nginx Helper's triggers) |
 | any term edited or deleted (categories, tags, brands, menus…) | **one** home-page purge per request, instead of Nginx Helper's home page + 3 feeds per term (an hourly import of 176 categories made 704 requests); nothing when the home page is switched off |
+
+**Never-cached pages.** Since 0.4.0 the cart, checkout and account pages send `Do-Not-Cache: 1` whatever their slug, see [Never cached](#never-cached-rest-api-and-woocommerce-pages). `./test.sh woo <site>` checks the decision for the three pages and an ordinary page (on any cache type).
 
 **It also trims Nginx Helper's own purges** (in memory, for every request; nothing is saved):
 
