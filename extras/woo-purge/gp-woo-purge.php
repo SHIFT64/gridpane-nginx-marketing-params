@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WooCommerce purge for Nginx Helper
  * Description: Keeps the cart, checkout and account pages out of the GridPane page cache whatever their slug. Purges the page cache of a product, its archives, the shop page and the home page when WooCommerce changes a price or a stock status without a post update (orders, REST API, imports, bulk edit, scheduled sales). Trims Nginx Helper's own purges: no orders/coupons, no feeds, no AMP fetches, one home-page purge per request for term edits, all sent after the response. Installed by gridpane-nginx-marketing-params.
- * Version: 0.4.0
+ * Version: 0.4.1
  * Requires PHP: 7.4
  *
  * Why: Nginx Helper purges on `transition_post_status`, i.e. only when WordPress updates the post.
@@ -47,7 +47,7 @@ defined( 'ABSPATH' ) || exit;
 
 final class GP_Woo_Purge {
 
-	const VERSION = '0.4.0';
+	const VERSION = '0.4.1';
 
 	/** Key in Nginx Helper's in-memory options: the real values of the keys trimmed here. Never saved. */
 	const TUNED = '_gp_woo_purge_tuned';
@@ -75,15 +75,25 @@ final class GP_Woo_Purge {
 	 * defines DONOTCACHEPAGE on these pages; other plugins' DONOTCACHEPAGE is honoured too.
 	 */
 	public static function never_cache_woo_pages() {
-		if ( headers_sent() ) {
-			return;
-		}
-		$woo = ( function_exists( 'is_cart' ) && is_cart() )
-			|| ( function_exists( 'is_checkout' ) && is_checkout() )
-			|| ( function_exists( 'is_account_page' ) && is_account_page() );
-		if ( apply_filters( 'gp_woo_never_cache_page', $woo || ( defined( 'DONOTCACHEPAGE' ) && DONOTCACHEPAGE ) ) ) {
+		if ( ! headers_sent() && self::is_never_cached_page() ) {
 			header( 'Do-Not-Cache: 1' );
 		}
+	}
+
+	/**
+	 * The decision alone (no output), for the current main query. The page IDs are checked
+	 * directly too: WooCommerce 8+ caches is_cart() / is_checkout() per request
+	 * (CartCheckoutUtils), which can be computed before the main query is known.
+	 */
+	public static function is_never_cached_page() {
+		$ids = array_filter( array_map( 'wc_get_page_id', array( 'cart', 'checkout', 'myaccount' ) ), static function ( $id ) {
+			return $id > 0;
+		} );
+		$woo = ( $ids && is_page( array_values( $ids ) ) )
+			|| ( function_exists( 'is_cart' ) && is_cart() )
+			|| ( function_exists( 'is_checkout' ) && is_checkout() )
+			|| ( function_exists( 'is_account_page' ) && is_account_page() );
+		return (bool) apply_filters( 'gp_woo_never_cache_page', $woo || ( defined( 'DONOTCACHEPAGE' ) && DONOTCACHEPAGE ) );
 	}
 
 	/**
