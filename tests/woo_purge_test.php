@@ -38,37 +38,34 @@ gpwt( 'WooCommerce active', class_exists( 'WooCommerce' ) );
 // and for an ordinary page, read through the add-on's filter. Works for any cache type.
 gpwt_out( '' );
 gpwt_out( 'Never-cached WooCommerce pages (Do-Not-Cache)' );
-if ( method_exists( 'GP_Woo_Purge', 'never_cache_woo_pages' ) ) {
-	$gpwt_decision = null;
-	$gpwt_spy      = static function ( $v ) use ( &$gpwt_decision ) {
-		$gpwt_decision = (bool) $v;
-		return false;   // decided, but never send a header from the test
-	};
-	add_filter( 'gp_woo_never_cache_page', $gpwt_spy, PHP_INT_MAX );
+if ( method_exists( 'GP_Woo_Purge', 'is_never_cached_page' ) ) {
 	$gpwt_pages = array( 'cart' => true, 'checkout' => true, 'myaccount' => true );
 	$gpwt_plain = get_posts( array( 'post_type' => 'page', 'post_status' => 'publish', 'numberposts' => 1, 'fields' => 'ids', 'post__not_in' => array_map( 'wc_get_page_id', array_keys( $gpwt_pages ) ) ) );
 	if ( $gpwt_plain ) {
 		$gpwt_pages[ 'page:' . $gpwt_plain[0] ] = false;
 	}
+	$gpwt_dncp = defined( 'DONOTCACHEPAGE' ) && DONOTCACHEPAGE;
 	foreach ( $gpwt_pages as $gpwt_key => $gpwt_want ) {
 		$gpwt_id = 0 === strpos( $gpwt_key, 'page:' ) ? (int) substr( $gpwt_key, 5 ) : wc_get_page_id( $gpwt_key );
 		if ( $gpwt_id <= 0 ) {
 			gpwt_out( '  SKIP ' . $gpwt_key . ' (no page assigned)' );
 			continue;
 		}
+		if ( ! $gpwt_want && $gpwt_dncp ) {
+			gpwt_out( '  SKIP ' . $gpwt_key . ' (DONOTCACHEPAGE already defined in this run)' );
+			continue;
+		}
 		query_posts( array( 'page_id' => $gpwt_id ) );
-		$gpwt_decision = null;
-		GP_Woo_Purge::never_cache_woo_pages();
+		$gpwt_got = GP_Woo_Purge::is_never_cached_page();
 		gpwt(
 			$gpwt_key . ' ' . wp_make_link_relative( get_permalink( $gpwt_id ) ) . ' -> ' . ( $gpwt_want ? 'Do-Not-Cache' : 'cacheable' ),
-			$gpwt_want === $gpwt_decision,
-			'decision=' . var_export( $gpwt_decision, true )
+			$gpwt_want === $gpwt_got,
+			'decision=' . var_export( $gpwt_got, true )
 		);
 	}
 	wp_reset_query();
-	remove_filter( 'gp_woo_never_cache_page', $gpwt_spy, PHP_INT_MAX );
 } else {
-	gpwt( 'add-on has never_cache_woo_pages() (0.4.0+)', false );
+	gpwt( 'add-on has is_never_cached_page() (0.4.1+)', false );
 }
 gpwt_out( '' );
 gpwt( 'Nginx Helper active with purge enabled', is_object( $nginx_purger ) && ! empty( $nginx_helper_admin->options['enable_purge'] ) );
