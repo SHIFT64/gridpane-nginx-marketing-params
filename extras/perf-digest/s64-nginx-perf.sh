@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SHIFT64 nginx perf digest — daily per-site analysis of nginx access logs.
-# Run from cron at 23:50, before midnight log rotation.
+# Run from cron at 23:59 (TODAY is fixed at start, so a run past midnight still reports the right day).
 #
 # GridPane access log format (observed on disk):
 #   [12/Jun/2026:17:05:00 +0200] IP UPSTREAM_TIME CACHE HOST "GET /uri HTTP/2.0" STATUS BYTES REQ_TIME "ref" "ua"

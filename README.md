@@ -345,7 +345,7 @@ A marketing-parameter request (`/?gclid=…`) served from the clean URL's entry 
 
 ## Nightly perf digest to Discord (optional add-on)
 
-`extras/perf-digest/` reads each site's nginx access log once a day (23:50) and posts one Discord message per site: response-time percentiles of the pages people actually see, the page-cache split, where PHP time went, status codes, and the 5 slowest PHP requests together with what else was in flight at the time (`s64-slow-catch.sh`). The message turns red when a day is clearly worse than the 7-day median.
+`extras/perf-digest/` reads each site's nginx access log once a day (23:59) and posts one Discord message per site: response-time percentiles of the pages people actually see, the page-cache split, where PHP time went, status codes, and the 5 slowest PHP requests together with what else was in flight at the time (`s64-slow-catch.sh`). The message turns red when a day is clearly worse than the 7-day median.
 
 ```bash
 DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/…' ./extras/perf-digest/install.sh site1.com site2.com

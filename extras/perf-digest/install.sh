@@ -12,7 +12,7 @@
 # /etc/s64-opcache-alert.conf is used as well when this config has none.
 #
 # Installs /usr/local/bin/s64-nginx-perf.sh + s64-slow-catch.sh (a changed old copy is kept as
-# <name>.bak-<date>) and /etc/cron.d/s64-nginx-perf (23:50 daily). History:
+# <name>.bak-<date>) and /etc/cron.d/s64-nginx-perf (23:59 daily). History:
 # /var/lib/s64-nginx-perf/<site>.csv. For the exact HIT / MISS / BYPASS split on Redis sites,
 # also enable ../cache-log/install.sh for the same sites.
 set -Eeuo pipefail
@@ -75,9 +75,9 @@ cmd_install() {
     echo "warning: no webhook configured - reports are only printed (set DISCORD_WEBHOOK_URL and re-run)"
   fi
 
-  local line="50 23 * * * root /usr/local/bin/s64-nginx-perf.sh >/dev/null 2>&1"
+  local line="59 23 * * * root /usr/local/bin/s64-nginx-perf.sh >/dev/null 2>&1"
   if [[ "$(cat "$CRON" 2>/dev/null)" != "$line" ]]; then
-    printf '%s\n' "$line" > "$CRON"; chmod 644 "$CRON"; echo "cron: $CRON (23:50 daily)"
+    printf '%s\n' "$line" > "$CRON"; chmod 644 "$CRON"; echo "cron: $CRON (23:59 daily)"
   else
     echo "cron: current"
   fi
