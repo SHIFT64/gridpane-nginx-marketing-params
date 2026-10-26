@@ -309,6 +309,40 @@ gp wp yourshop.com option update gp_woo_purge_home no      # back on: option del
 - Multilingual sites (WPML, Polylang): only the URLs WordPress returns for the current language are purged.
 - GridPane's scripts were audited for the nginx files, not for `mu-plugins/`. Check `./install.sh --status` after a restore or clone, as for the switch files.
 
+## Exact cache log (optional add-on)
+
+GridPane's access log (`we_log`) has `$upstream_cache_status`, which the Redis page cache (srcache) never sets. You cannot tell from it whether a page was a HIT, a MISS or skipped on purpose. The usual guess, "no PHP time = HIT", cannot see cookie bypasses (logged-in users, carts) and counts them as MISS. `extras/cache-log/` adds a second access log per site with srcache's own verdict:
+
+```bash
+./extras/cache-log/install.sh site1.com site2.com   # enable (Redis page-cache sites only, others are skipped with the reason)
+./extras/cache-log/install.sh --status              # what is installed, is it current, nginx -t
+./extras/cache-log/install.sh --disable site1.com   # stop logging for a site (old log files are kept)
+./extras/cache-log/install.sh --uninstall           # every site off + the log_format removed
+```
+
+It writes `/etc/nginx/conf.d/s64-cachelog.conf` (one `log_format s64cache`) and `/var/www/<site>/nginx/s64-cachelog-main-context.conf` (one `access_log` line, next to GridPane's own `access_log` in the `server` block). No GridPane-managed file is edited. Every run does `nginx -t` first. If it fails, the previous files are put back and nginx is not reloaded. Re-running it is safe: files that are already current are left alone. GridPane's logrotate (`/var/log/nginx/*log`) rotates `/var/log/nginx/<site>.cache.log` together with the main log.
+
+One line per request (static files and anything else with `access_log off` are not logged):
+
+```
+2026-10-26T08:32:51+01:00 127.0.0.1 GET 200 0.391 MISS BYPASS skip= dnc=1 287156 "/koszyk/" "0.390" "Mozilla/5.0 ..."
+time                      ip        method status request_time fetch store skip=<$skip_reason> dnc=<Do-Not-Cache> bytes "uri" "php_time" "user_agent"
+```
+
+How to read it:
+
+| fetch | store | skip / dnc | means |
+|---|---|---|---|
+| `HIT` | `BYPASS` | – | served from Redis; PHP did not run (`php_time` = `-`) |
+| `MISS` | `STORE` | – | cacheable but not in Redis yet: PHP rendered it and it was stored |
+| `BYPASS` | `BYPASS` | `skip=-http_cookie` / `-query_string` / `-request_uri` / `-POST` / `-rest_api` | never cached by design (GridPane's skip rule; `-rest_api` = this repo's engine) |
+| `MISS` | `BYPASS` | `dnc=1` | the page sent `Do-Not-Cache` (WooCommerce cart / checkout / account, [add-on](#woocommerce-purge-add-on)) |
+| `MISS` | `BYPASS` | – | not a 200 response (404, redirect): srcache stores 200 only |
+
+A marketing-parameter request (`/?gclid=…`) served from the clean URL's entry logs as `HIT`. The log works without the rest of this repo too, as long as the site is on GridPane's Redis page cache.
+
+**Cost.** One more `write()` of about 250 bytes per logged request, which is what GridPane already does for its own log. That is microseconds, against 1 ms for a Redis HIT and hundreds of ms for PHP. Disk: roughly 5 MB a day per 20,000 requests, before compression. Need fewer syscalls on a very busy site? Add `buffer=64k flush=5s` to the `access_log` line. Lines then reach the file up to 5 s late.
+
 ## GridPane Lua (hidden) vs this repo
 
 GridPane ships an undocumented feature that does something similar: `gp stack nginx -lua query-param-cache …` and `gp site <site> -lua-query-param-cache on`. We compared the two on the same WooCommerce site. The same scripted matrix ran in three modes, one after another: stock, this repo, GridPane Lua. Details:
@@ -352,6 +386,7 @@ server/marketing-params/        → /etc/nginx/marketing-params/  (php-context.c
 server/stubs/                   → /etc/nginx/conf.d/marketing-params.conf
 site/                           → /var/www/<site>/nginx/  (switch + flag; FastCGI or Redis variant)
 extras/woo-purge/               → /var/www/<site>/htdocs/wp-content/mu-plugins/gp-woo-purge.php
+extras/cache-log/               optional exact Redis cache log: install.sh, s64-cachelog.conf → /etc/nginx/conf.d/ (+ one file per site)
 tests/                          sandbox_test.py, install_test.py, live_test.py, fake_php.py (PHP-FPM stand-in), woo_purge_test.php
 docs/                           gridpane-lua-query-param-cache.md (GridPane's Lua feature: how it works, findings)
 ```
