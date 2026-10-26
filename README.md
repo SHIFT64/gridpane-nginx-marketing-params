@@ -370,7 +370,8 @@ What the report shows:
 | `PAGES` | GET pages for people: no static files, `/wp-json/`, wp-admin / wp-login / ajax, bots (incl. link previews like `facebookexternalhit`) or uptime monitors. Times run until the last byte is sent, so slow clients and heavy HTML count. |
 | `HIT` / `MISS` / `BYPASS` | page-cache split of `PAGES`. With the [exact cache log](#exact-cache-log-optional-add-on) enabled for the site (`Redis exact`), it is srcache's own verdict: `MISS` = cacheable, generated and stored. `BYPASS` = never cached, split into `cookie` (logged-in / cart session), `query`, `cart` (Do-Not-Cache page), `uri`. Without that log it is inferred from GridPane's log, and cookie bypasses then count as MISS. FastCGI sites use `$upstream_cache_status`. |
 | `non200` | 404 pages and redirects rendered by PHP (never cached) |
-| `bots` / `API` / `admin` / `PHP` | the traffic that is not pages, and everything that reached PHP |
+| `bots` / `API` / `admin` | the traffic that is not pages |
+| `PHP` (backend) | every request that ran PHP, any kind incl. POST, with pure PHP time (no client download); overlaps the rows above and drives the PHP p95 alert |
 | PHP time spent | PHP seconds per kind of traffic (pages, 404s, API, admin, bots, monitors, POST): shows what the PHP workers spent the day on |
 
 `S64_DRY_RUN=1`, `S64_DATE=YYYY-MM-DD` and `S64_HIST_DIR=<dir>` also work on the script directly (`--test` uses them). Needs `python3` and `curl`.

@@ -380,9 +380,12 @@ for site in $SITES; do
     tbl+=$'\n'$(trow "bots" "$bots" "" "$tmp/k_BOT")
     tbl+=$'\n'$(trow "API" "$api_n" "" "$tmp/k_API")
     tbl+=$'\n'$(trow "admin" "$(wc -l < "$tmp/k_ADMIN")" "" "$tmp/k_ADMIN")
+    tbl+=$'\n'"── backend (every request that ran PHP)"
     tbl+=$'\n'$(trow "PHP" "$php_n" "" "$tmp/php")
-    tnote+=$'\n'"_PHP = PHP time of everything that reached PHP (incl. POST)_"
-    fields+="${tname}${RS}"'```'$'\n'"${tbl}"$'\n''```'$'\n'"${tnote}${FS}"
+    tnote+=$'\n'"_PHP = pure PHP time (no client download) of everything that ran PHP: pages, 404s, API, admin, bots, POST — overlaps the rows above_"
+    # table and legend as separate fields: Discord caps a field value at 1024 chars
+    fields+="${tname}${RS}"'```'$'\n'"${tbl}"$'\n''```'"${FS}"
+    fields+="How to read it${RS}${tnote}${FS}"
     [ -n "$php_spent" ] && fields+="PHP time spent${RS}${php_spent}${FS}"
     stat=$(printf '%-28s %6s  %s\n' "5xx errors" "$err5" "${err5_pct}%")
     stat+=$'\n'$(printf '%-28s %6s  %s\n' "499 client gave up" "$e499" "${e499_pct}%")
