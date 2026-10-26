@@ -325,7 +325,7 @@ It writes `/etc/nginx/conf.d/s64-cachelog.conf` (one `log_format s64cache`) and 
 One line per request (static files and anything else with `access_log off` are not logged):
 
 ```
-2026-10-26T08:32:51+01:00 127.0.0.1 GET 200 0.391 MISS BYPASS skip= dnc=1 287156 "/koszyk/" "0.390" "Mozilla/5.0 ..."
+2026-10-26T08:32:51+01:00 127.0.0.1 GET 200 0.391 MISS BYPASS skip= dnc=1 287156 "/cart/" "0.390" "Mozilla/5.0 ..."
 time                      ip        method status request_time fetch store skip=<$skip_reason> dnc=<Do-Not-Cache> bytes "uri" "php_time" "user_agent"
 ```
 
