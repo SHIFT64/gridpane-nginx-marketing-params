@@ -309,6 +309,73 @@ gp wp yourshop.com option update gp_woo_purge_home no      # back on: option del
 - Multilingual sites (WPML, Polylang): only the URLs WordPress returns for the current language are purged.
 - GridPane's scripts were audited for the nginx files, not for `mu-plugins/`. Check `./install.sh --status` after a restore or clone, as for the switch files.
 
+## Exact cache log (optional add-on)
+
+GridPane's access log (`we_log`) has `$upstream_cache_status`, which the Redis page cache (srcache) never sets. You cannot tell from it whether a page was a HIT, a MISS or skipped on purpose. The usual guess, "no PHP time = HIT", cannot see cookie bypasses (logged-in users, carts) and counts them as MISS. `extras/cache-log/` adds a second access log per site with srcache's own verdict:
+
+```bash
+./extras/cache-log/install.sh site1.com site2.com   # enable (Redis page-cache sites only, others are skipped with the reason)
+./extras/cache-log/install.sh --status              # what is installed, is it current, nginx -t
+./extras/cache-log/install.sh --disable site1.com   # stop logging for a site (old log files are kept)
+./extras/cache-log/install.sh --uninstall           # every site off + the log_format removed
+```
+
+It writes `/etc/nginx/conf.d/s64-cachelog.conf` (one `log_format s64cache`) and `/var/www/<site>/nginx/s64-cachelog-main-context.conf` (one `access_log` line, next to GridPane's own `access_log` in the `server` block). No GridPane-managed file is edited. Every run does `nginx -t` first. If it fails, the previous files are put back and nginx is not reloaded. Re-running it is safe: files that are already current are left alone. GridPane's logrotate (`/var/log/nginx/*log`) rotates `/var/log/nginx/<site>.cache.log` together with the main log.
+
+One line per request (static files and anything else with `access_log off` are not logged):
+
+```
+2026-10-26T08:32:51+01:00 127.0.0.1 GET 200 0.391 MISS BYPASS skip= dnc=1 287156 "/cart/" "0.390" "Mozilla/5.0 ..."
+time                      ip        method status request_time fetch store skip=<$skip_reason> dnc=<Do-Not-Cache> bytes "uri" "php_time" "user_agent"
+```
+
+How to read it:
+
+| fetch | store | skip / dnc | means |
+|---|---|---|---|
+| `HIT` | `BYPASS` | – | served from Redis; PHP did not run (`php_time` = `-`) |
+| `MISS` | `STORE` | – | cacheable but not in Redis yet: PHP rendered it and it was stored |
+| `BYPASS` | `BYPASS` | `skip=-http_cookie` / `-query_string` / `-request_uri` / `-POST` / `-rest_api` | never cached by design (GridPane's skip rule; `-rest_api` = this repo's engine) |
+| `MISS` | `BYPASS` | `dnc=1` | the page sent `Do-Not-Cache` (WooCommerce cart / checkout / account, [add-on](#woocommerce-purge-add-on)) |
+| `MISS` | `BYPASS` | – | not a 200 response (404, redirect): srcache stores 200 only |
+
+A marketing-parameter request (`/?gclid=…`) served from the clean URL's entry logs as `HIT`. The log works without the rest of this repo too, as long as the site is on GridPane's Redis page cache. The [perf digest](#nightly-perf-digest-to-discord-optional-add-on) reads it for its exact HIT / MISS / BYPASS rows.
+
+**Cost.** One more `write()` of about 250 bytes per logged request, which is what GridPane already does for its own log. That is microseconds, against 1 ms for a Redis HIT and hundreds of ms for PHP. Disk: roughly 5 MB a day per 20,000 requests, before compression. Need fewer syscalls on a very busy site? Add `buffer=64k flush=5s` to the `access_log` line. Lines then reach the file up to 5 s late.
+
+## Nightly perf digest to Discord (optional add-on)
+
+`extras/perf-digest/` reads each site's nginx access log once a day (23:59) and posts one Discord message per site: response-time percentiles of the pages people actually see, the page-cache split, where PHP time went, status codes, and the 5 slowest PHP requests together with what else was in flight at the time (`s64-slow-catch.sh`). The message turns red when a day is clearly worse than the 7-day median.
+
+```bash
+DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/…' ./extras/perf-digest/install.sh site1.com site2.com
+./extras/perf-digest/install.sh --test               # print today's report, post nothing (history untouched)
+./extras/perf-digest/install.sh --test 2026-10-25    # same for an earlier day still in the logs
+./extras/perf-digest/install.sh --status             # scripts current?, sites, webhook, cron, last report per site
+./extras/perf-digest/install.sh                      # after git pull: update the scripts, keep the site list
+./extras/perf-digest/install.sh --uninstall          # scripts + cron off (config and history kept)
+```
+
+Without `DISCORD_WEBHOOK_URL` in the environment, the installer asks for the webhook (hidden input) when none is configured yet. It never takes it as an argument, so the URL stays out of shell history. Installed files:
+
+- `/usr/local/bin/s64-nginx-perf.sh` and `s64-slow-catch.sh`. A changed old copy is kept as `<name>.bak-<date>`.
+- `/etc/s64-nginx-perf.conf` (mode 600): `SITES="…"` and `DISCORD_WEBHOOK_URL="…"`.
+- `/etc/cron.d/s64-nginx-perf`.
+- History in `/var/lib/s64-nginx-perf/<site>.csv`, used for the 7-day baseline. Alerts start on day 4.
+
+What the report shows:
+
+| row | what it is |
+|---|---|
+| `PAGES` | GET pages for people: no static files, `/wp-json/`, wp-admin / wp-login / ajax, bots (incl. link previews like `facebookexternalhit`) or uptime monitors. Times run until the last byte is sent, so slow clients and heavy HTML count. |
+| `HIT` / `MISS` / `BYPASS` | page-cache split of `PAGES`. With the [exact cache log](#exact-cache-log-optional-add-on) enabled for the site (`Redis exact`), it is srcache's own verdict: `MISS` = cacheable, generated and stored. `BYPASS` = never cached, split into `cookie` (logged-in / cart session), `query`, `cart` (Do-Not-Cache page), `uri`. Without that log it is inferred from GridPane's log, and cookie bypasses then count as MISS. FastCGI sites use `$upstream_cache_status`. |
+| `non200` | 404 pages and redirects rendered by PHP (never cached) |
+| `bots` / `API` / `admin` | the traffic that is not pages |
+| `PHP` (backend) | every request that ran PHP, any kind incl. POST, with pure PHP time (no client download); overlaps the rows above and drives the PHP p95 alert |
+| PHP time spent | PHP seconds per kind of traffic (pages, 404s, API, admin, bots, monitors, POST): shows what the PHP workers spent the day on |
+
+`S64_DRY_RUN=1`, `S64_DATE=YYYY-MM-DD` and `S64_HIST_DIR=<dir>` also work on the script directly (`--test` uses them). Needs `python3` and `curl`.
+
 ## GridPane Lua (hidden) vs this repo
 
 GridPane ships an undocumented feature that does something similar: `gp stack nginx -lua query-param-cache …` and `gp site <site> -lua-query-param-cache on`. We compared the two on the same WooCommerce site. The same scripted matrix ran in three modes, one after another: stock, this repo, GridPane Lua. Details:
@@ -352,6 +419,8 @@ server/marketing-params/        → /etc/nginx/marketing-params/  (php-context.c
 server/stubs/                   → /etc/nginx/conf.d/marketing-params.conf
 site/                           → /var/www/<site>/nginx/  (switch + flag; FastCGI or Redis variant)
 extras/woo-purge/               → /var/www/<site>/htdocs/wp-content/mu-plugins/gp-woo-purge.php
+extras/cache-log/               optional exact Redis cache log: install.sh, s64-cachelog.conf → /etc/nginx/conf.d/ (+ one file per site)
+extras/perf-digest/             optional nightly Discord digest: install.sh, s64-nginx-perf.sh + s64-slow-catch.sh → /usr/local/bin/
 tests/                          sandbox_test.py, install_test.py, live_test.py, fake_php.py (PHP-FPM stand-in), woo_purge_test.php
 docs/                           gridpane-lua-query-param-cache.md (GridPane's Lua feature: how it works, findings)
 ```
