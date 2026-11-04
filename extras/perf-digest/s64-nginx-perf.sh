@@ -148,11 +148,13 @@ for site in $SITES; do
     #   API   = /wp-json/ and ?rest_route= (integrations, not people)
     #   ADMIN = wp-admin, wp-login, xmlrpc, wp-cron, ?wc-ajax= fragments
     #   BOT   = crawlers, link previews (facebookexternalhit fetches ~450
-    #           pages a day and downloads slowly), scripts, empty UA
+    #           pages a day and downloads slowly), scripts, empty UA,
+    #           price-comparison scrapers with a browser UA (GeedoShopProductFinder
+    #           made a false red day on merida, 2026-11-02)
     # Page-cache hits stay in PAGE — a 0 ms cached page is genuine user
     # experience. All of them still count under PHP when PHP ran.
     MON='uptime-kuma|uptimerobot|betteruptime|better uptime|pingdom|statuscake|site24x7'
-    BOT='bot|crawl|spider|slurp|preview|externalhit|facebookcatalog|meta-external|bytespider|gptbot|claude|perplexity|python|curl|wget|go-http|okhttp|java/|headless|lighthouse|scrapy|ahrefs|semrush'
+    BOT='bot|crawl|spider|slurp|preview|externalhit|facebookcatalog|meta-external|bytespider|gptbot|claude|perplexity|python|curl|wget|go-http|okhttp|java/|headless|lighthouse|scrapy|ahrefs|semrush|productfinder'
     KIND='function kind(m, st, u, ua) {
         if (m != "GET" || st ~ /^(401|403|412|444)$/) return ""
         if (u ~ /\.(css|js|mjs|map|png|jpe?g|webp|avif|svg|woff2?|ttf|otf|eot|ico|gif|mp4|webm|pdf|txt|xml|json)(\?|$)/) return ""
