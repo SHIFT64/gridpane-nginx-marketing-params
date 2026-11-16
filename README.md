@@ -320,7 +320,7 @@ GridPane's access log (`we_log`) has `$upstream_cache_status`, which the Redis p
 ./extras/cache-log/install.sh --uninstall           # every site off + the log_format removed
 ```
 
-It writes `/etc/nginx/conf.d/s64-cachelog.conf` (one `log_format s64cache`) and `/var/www/<site>/nginx/s64-cachelog-main-context.conf` (one `access_log` line, next to GridPane's own `access_log` in the `server` block). No GridPane-managed file is edited. Every run does `nginx -t` first. If it fails, the previous files are put back and nginx is not reloaded. Re-running it is safe: files that are already current are left alone. GridPane's logrotate (`/var/log/nginx/*log`) rotates `/var/log/nginx/<site>.cache.log` together with the main log.
+It writes `/etc/nginx/conf.d/gnmp-cachelog.conf` (one `log_format gnmpcache`) and `/var/www/<site>/nginx/gnmp-cachelog-main-context.conf` (one `access_log` line, next to GridPane's own `access_log` in the `server` block). The names follow the repository's short name `gnmp`; the [naming](#naming) section covers the old `s64` names and the automatic migration. No GridPane-managed file is edited. Every run does `nginx -t` first. If it fails, the previous files are put back and nginx is not reloaded. Re-running it is safe: files that are already current are left alone. GridPane's logrotate (`/var/log/nginx/*log`) rotates `/var/log/nginx/<site>.cache.log` together with the main log.
 
 One line per request (static files and anything else with `access_log off` are not logged):
 
@@ -409,6 +409,15 @@ GridPane may change its feature, so treat the Lua column as a snapshot of that v
 - **This repo** is the better fit for FastCGI and Redis sites whose theme or plugins echo parameters (WooCommerce and WordPress's comment form did), or when you want the broader default list. In exchange you accept: PHP never sees listed params, custom skip rules need a reason, and you maintain it yourself.
 - **Never run both on the same site.**
 
+## Naming
+
+The repository's short name is **gnmp** (gridpane nginx marketing params). Files the optional add-ons create outside this repository use it, so they cannot be confused with another project's files:
+
+- Exact cache log: `/etc/nginx/conf.d/gnmp-cachelog.conf` (one `log_format gnmpcache`) and `/var/www/<site>/nginx/gnmp-cachelog-main-context.conf`.
+- Earlier releases used the `s64` name for the same files: `s64-cachelog.conf`, `log_format s64cache` and `s64-cachelog-main-context.conf`. `extras/cache-log/install.sh` migrates them on the next enable run: the site file is rewritten with the new names, the old file is removed, and the old `log_format` file goes once no site uses it. `--status` reports anything still on the old names.
+
+The core installer keeps its established `marketing-params` names (`/etc/nginx/marketing-params/`, `marketing-params-*-context.conf`, `$gp_mkt_*`), which match GridPane's own file naming. `extras/perf-digest/` still installs `s64-nginx-perf.sh`, `s64-slow-catch.sh` and their config, cron and history paths: installed cron lines and copies use those names, so they are not renamed with the cache log. Only its comments referring to the cache-log files use the `gnmp` names.
+
 ## Repository layout
 
 ```
@@ -419,7 +428,7 @@ server/marketing-params/        → /etc/nginx/marketing-params/  (php-context.c
 server/stubs/                   → /etc/nginx/conf.d/marketing-params.conf
 site/                           → /var/www/<site>/nginx/  (switch + flag; FastCGI or Redis variant)
 extras/woo-purge/               → /var/www/<site>/htdocs/wp-content/mu-plugins/gp-woo-purge.php
-extras/cache-log/               optional exact Redis cache log: install.sh, s64-cachelog.conf → /etc/nginx/conf.d/ (+ one file per site)
+extras/cache-log/               optional exact Redis cache log: install.sh, gnmp-cachelog.conf → /etc/nginx/conf.d/ (+ one file per site)
 extras/perf-digest/             optional nightly Discord digest: install.sh, s64-nginx-perf.sh + s64-slow-catch.sh → /usr/local/bin/
 tests/                          sandbox_test.py, install_test.py, live_test.py, fake_php.py (PHP-FPM stand-in), woo_purge_test.php
 docs/                           gridpane-lua-query-param-cache.md (GridPane's Lua feature: how it works, findings)
