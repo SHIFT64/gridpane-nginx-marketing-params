@@ -21,7 +21,7 @@
 # green = healthy day; blue = baseline still building) + a "top 5 slowest PHP
 # requests" embed (deduped by URI). Sites with a page cache also get a
 # HIT/MISS/BYPASS split of customer pages (exact from <site>.cache.log when
-# the s64cache log is enabled, else inferred), and MISS p95 joins the
+# the gnmpcache log is enabled, else inferred), and MISS p95 joins the
 # degradation check. get_p* in the history = customer pages (since 2026-10-26;
 # before that all GETs incl. wp-json / bots).
 # History: /var/lib/s64-nginx-perf/<site>.csv
@@ -190,9 +190,9 @@ for site in $SITES; do
              print out }' "$tmp/kinds")
 
     # ── page cache split of PAGE requests ────────────────────────
-    # Exact (Redis): /var/log/nginx/<site>.cache.log, written by the s64cache
-    # log_format (/etc/nginx/conf.d/s64-cachelog.conf, enabled per site in
-    # /var/www/<site>/nginx/s64-cachelog-main-context.conf), carries
+    # Exact (Redis): /var/log/nginx/<site>.cache.log, written by the gnmpcache
+    # log_format (/etc/nginx/conf.d/gnmp-cachelog.conf, enabled per site in
+    # /var/www/<site>/nginx/gnmp-cachelog-main-context.conf), carries
     # srcache's own verdict and GridPane's $skip_reason:
     #   HIT    = served from Redis
     #   MISS   = cacheable, but not in Redis yet: PHP generated + stored it
@@ -219,7 +219,7 @@ for site in $SITES; do
     fi
     hit_pct="n/a"; miss_p95="n/a"; cache_since=""
     if [ "$cache_mode" = "Redis exact" ]; then
-        # s64cache line, split on '"':  $1 = time ip method status request_time
+        # gnmpcache line, split on '"':  $1 = time ip method status request_time
         # fetch store skip=.. dnc=.. bytes · $2 = uri · $4 = php time · $6 = ua
         cache_since=$(sort "$tmp/clines" | head -1 | cut -c12-16)
         awk -F'"' -v mon="$MON" -v bot="$BOT" "$KIND"'{
