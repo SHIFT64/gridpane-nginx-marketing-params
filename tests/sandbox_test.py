@@ -761,7 +761,8 @@ def run_matrix(R):
     gen = h0.get("x-test-gen")
     for q in ["gclid=1", "gclid=2&utm_source=fb&utm_medium=cpc&fbclid=x", "UTM_Source=X&GCLID=Y",
               "gad_source=1&gad_campaignid=123&gbraid=a&wbraid=b", "_gl=1*abc*_ga*MTIz&msclkid=9",
-              "hsa_acc=1&hsa_cam=2&hsa_grp=3&hsa_ad=4", "mtm_campaign=x&pk_source=y&ttclid=z"]:
+              "hsa_acc=1&hsa_cam=2&hsa_grp=3&hsa_ad=4", "mtm_campaign=x&pk_source=y&ttclid=z",
+              "campaign_id=1&medium_id=2&content_id=3&utm_source=fb&fbclid=x"]:
         h, _ = get("/a/?" + q)
         R.check("/a/?%s -> HIT of /a/" % q[:50],
                 h.get("x-grid-cache") == "HIT" and h.get("x-test-gen") == gen and h.get("x-grid-cache-mkt") == "ignored",

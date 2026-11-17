@@ -42,6 +42,10 @@ fb_action_ids 1;
 fb_action_types 1;
 fb_source 1;
 igshid 1;
+# Meta ad URL macros (dynamic parameters): reporting only, read by the pixel in JS
+campaign_id 1;
+medium_id 1;
+content_id 1;
 
 # --- Microsoft Ads
 msclkid 1;
