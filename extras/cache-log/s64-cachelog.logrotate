@@ -1,0 +1,22 @@
+# Rotation of the exact Redis page-cache logs (gridpane-nginx-marketing-params, extras/cache-log).
+# Installed by extras/cache-log/install.sh as /etc/logrotate.d/s64-cachelog; remove with --uninstall.
+# GridPane's /etc/logrotate.d/nginx (v1, #2258) rotates *.access.log and *.error.log only. This
+# pattern matches neither: logrotate errors on a file matched twice. Same settings and file names
+# as GridPane's access-log stanza (<site>.cache.log-YYYYMMDD-<epoch>.gz): rotated daily, or by the
+# hourly logrotate run once a log is over 10M; kept 30 days.
+/var/log/nginx/*.cache.log {
+    create 0644 root root
+    daily
+    maxsize 10M
+    maxage 30
+    rotate 800
+    dateext
+    dateformat -%Y%m%d-%s
+    missingok
+    notifempty
+    compress
+    sharedscripts
+    postrotate
+        /bin/kill -USR1 $(cat /var/run/nginx.pid 2>/dev/null) 2>/dev/null || true
+    endscript
+}

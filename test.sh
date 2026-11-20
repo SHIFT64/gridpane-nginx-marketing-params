@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Tests for the GridPane marketing-params cache config.
 #
-#   ./test.sh                         sandbox test + installer test (below). Touches nothing live.
-#                                     Safe on production servers.
+#   ./test.sh                         sandbox test + installer test + extras test (below). Touches
+#                                     nothing live. Safe on production servers.
 #   ./test.sh --cache fcgi|redis|all  sandbox test only: throw-away nginx on a random port with
 #                                     GridPane's real templates + this repo + a fake PHP
 #                                     (Redis: + a throw-away redis-server)
@@ -13,6 +13,9 @@
 #                                     site's WordPress (gp wp); purges nothing, saves nothing
 #   ./test.sh install                 test of install.sh in every mode, in a throw-away root under
 #                                     /tmp with the real nginx -t (touches nothing live)
+#   ./test.sh extras                  test of extras/cache-log (its logrotate file) and extras/perf-digest
+#                                     (rotated logs under both naming schemes), in a throw-away root
+#                                     under /tmp with synthetic logs and the real logrotate binary
 set -euo pipefail
 cd "$(dirname "$0")"
 if [[ "${1:-}" == "live" ]]; then
@@ -35,6 +38,9 @@ fi
 if [[ "${1:-}" == "install" ]]; then
   exec python3 tests/install_test.py
 fi
+if [[ "${1:-}" == "extras" ]]; then
+  exec python3 tests/extras_test.py
+fi
 if [[ $# -gt 0 ]]; then
   exec python3 tests/sandbox_test.py "$@"
 fi
@@ -43,5 +49,7 @@ python3 tests/sandbox_test.py || rc=$?
 echo
 python3 tests/install_test.py || { r=$?; [[ $rc -ne 0 ]] || rc=$r; }
 echo
-if [[ $rc -eq 0 ]]; then echo "ALL TESTS PASSED (sandbox + installer)"; else echo "TESTS FAILED (exit $rc)"; fi
+python3 tests/extras_test.py || { r=$?; [[ $rc -ne 0 ]] || rc=$r; }
+echo
+if [[ $rc -eq 0 ]]; then echo "ALL TESTS PASSED (sandbox + installer + extras)"; else echo "TESTS FAILED (exit $rc)"; fi
 exit $rc

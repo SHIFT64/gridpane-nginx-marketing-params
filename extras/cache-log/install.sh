@@ -4,21 +4,26 @@
 #   ./extras/cache-log/install.sh site1.com site2.com   enable for these sites (Redis page cache only)
 #   ./extras/cache-log/install.sh --status              what is installed, file checksums, nginx -t
 #   ./extras/cache-log/install.sh --disable site.com    stop writing the site's cache log
-#   ./extras/cache-log/install.sh --uninstall           disable every site + remove the log_format
+#   ./extras/cache-log/install.sh --uninstall           disable every site + remove the log_format and the rotation
 #
 # Writes a second access log per site, /var/log/nginx/<site>.cache.log, with srcache's own verdict
 # (HIT / MISS / BYPASS, store STORE / BYPASS), GridPane's $skip_reason and the Do-Not-Cache header.
-# GridPane's logrotate (/var/log/nginx/*log) rotates it like the main log. Old log files are kept
-# on --disable / --uninstall.
+# The logs are rotated by /etc/logrotate.d/s64-cachelog: GridPane's own logrotate file (v1) only
+# matches *.access.log and *.error.log. Where another logrotate file still matches the cache logs
+# (GridPane's older /var/log/nginx/*log), rotation is left to that file, because logrotate errors
+# on a file matched twice. Old log files are kept on --disable / --uninstall.
 #
-# Never touches GridPane-managed files: one file in /etc/nginx/conf.d/, one per site in
-# /var/www/<site>/nginx/. Every change runs `nginx -t`; if it fails, the previous files are put
-# back and nginx is not reloaded.
+# Never touches GridPane-managed files: one file in /etc/nginx/conf.d/, one in /etc/logrotate.d/,
+# one per site in /var/www/<site>/nginx/. Every change runs `nginx -t`; if it fails, the previous
+# files are put back and nginx is not reloaded.
 set -Eeuo pipefail
 cd "$(dirname "$0")"
 
 CONF_SRC="s64-cachelog.conf"
 CONF_DST="${GP_CACHELOG_ROOT:-}/etc/nginx/conf.d/s64-cachelog.conf"
+ROTATE_SRC="s64-cachelog.logrotate"
+ROTATE_DIR="${GP_CACHELOG_ROOT:-}/etc/logrotate.d"
+ROTATE_DST="$ROTATE_DIR/s64-cachelog"
 SITES_DIR="${GP_CACHELOG_ROOT:-}/etc/nginx/sites-available"
 WWW_DIR="${GP_CACHELOG_ROOT:-}/var/www"
 LOG_DIR="/var/log/nginx"
@@ -44,6 +49,16 @@ site_problem() {
     || { echo "vhost has no include of /var/www/$s/nginx/*-main-context.conf"; return; }
   [[ -d "$WWW_DIR/$s/nginx" ]] || echo "no $WWW_DIR/$s/nginx/"
 }
+# another logrotate file whose pattern already matches the cache logs (nothing = none)
+rotated_by() {
+  local f pat
+  for f in "$ROTATE_DIR"/*; do
+    [[ -f "$f" && "$f" != "$ROTATE_DST" ]] || continue
+    while read -r pat; do
+      if [[ "$LOG_DIR/site.cache.log" == $pat ]]; then echo "$f"; return 0; fi   # unquoted: a glob match
+    done < <(sed 's/#.*//' "$f" | grep -oE "$LOG_DIR/[^[:space:]{\"']+" || true)
+  done
+}
 
 # ── backup / apply / rollback ─────────────────────────────────────
 BAK="$(mktemp -d)"; TOUCHED=()
@@ -66,12 +81,16 @@ rollback() {
 write_file() { # $1 path, stdin = content; no-op when identical
   local tmp; tmp="$(mktemp)"; cat > "$tmp"
   if [[ -f "$1" ]] && cmp -s "$tmp" "$1"; then rm -f "$tmp"; return 0; fi
-  remember "$1"; install -m 644 "$tmp" "$1"; rm -f "$tmp"; CHANGED=1
+  remember "$1"; install -m 644 "$tmp" "$1"; rm -f "$tmp"; mark_changed "$1"
 }
 changing() { trap 'rollback "unexpected error"' ERR; }   # mutating commands only
-remove_file() { [[ -e "$1" ]] || return 0; remember "$1"; rm -f "$1"; CHANGED=1; }
+remove_file() { [[ -e "$1" ]] || return 0; remember "$1"; rm -f "$1"; mark_changed "$1"; }
+mark_changed() { if [[ "$1" = "$ROTATE_DST" ]]; then ROTATION_CHANGED=1; else CHANGED=1; fi; }   # nginx never reads the logrotate file
 apply() {
-  [[ "${CHANGED:-0}" = 1 ]] || { echo "nothing changed"; return 0; }
+  if [[ "${CHANGED:-0}" != 1 ]]; then
+    [[ "${ROTATION_CHANGED:-0}" = 1 ]] && echo "nginx files unchanged, nginx not reloaded" || echo "nothing changed"
+    return 0
+  fi
   local out
   if [[ -n "${GP_CACHELOG_ROOT:-}" ]]; then echo "(test root: nginx -t / reload skipped)"; return 0; fi
   if out="$(nginx -t 2>&1)"; then
@@ -80,6 +99,18 @@ apply() {
   else
     echo "$out" >&2
     rollback "nginx -t failed"
+  fi
+}
+
+# our logrotate file, unless another one already rotates the cache logs
+rotation() {
+  local by
+  [[ -d "$ROTATE_DIR" ]] || { echo "!! no $ROTATE_DIR: $LOG_DIR/*.cache.log will not be rotated" >&2; return 0; }
+  by="$(rotated_by)"
+  if [[ -n "$by" ]]; then
+    remove_file "$ROTATE_DST"; echo "rotation: left to $by (it matches $LOG_DIR/*.cache.log)"
+  else
+    write_file "$ROTATE_DST" < "$ROTATE_SRC"; echo "rotation: $ROTATE_DST (used from logrotate's next run)"
   fi
 }
 
@@ -92,12 +123,25 @@ enabled_sites() {
 }
 
 cmd_status() {
-  local s ok=1
+  local s by ok=1
   if [[ -f "$CONF_DST" ]]; then
     if cmp -s "$CONF_SRC" "$CONF_DST"; then echo "log_format: $CONF_DST (current)"
     else echo "log_format: $CONF_DST (differs from this checkout - run install)"; ok=0; fi
   else
     echo "log_format: not installed"
+  fi
+  by="$(rotated_by)"
+  if [[ -f "$ROTATE_DST" && -n "$by" ]]; then
+    echo "  !! rotation: $ROTATE_DST and $by both match $LOG_DIR/*.cache.log (logrotate errors on a file matched twice) - run install"; ok=0
+  elif [[ -f "$ROTATE_DST" ]]; then
+    if cmp -s "$ROTATE_SRC" "$ROTATE_DST"; then echo "rotation: $ROTATE_DST (current)"
+    else echo "rotation: $ROTATE_DST (differs from this checkout - run install)"; ok=0; fi
+  elif [[ -n "$by" ]]; then
+    echo "rotation: by $by"
+  elif [[ -n "$(enabled_sites)" ]]; then
+    echo "  !! rotation: nothing rotates $LOG_DIR/*.cache.log - run install"; ok=0
+  else
+    echo "rotation: not installed"
   fi
   for s in $(enabled_sites); do
     local p; p="$(site_problem "$s")"
@@ -126,6 +170,7 @@ cmd_enable() {
     if [[ -z "$(site_problem "$s")" ]]; then write_file "$(site_conf "$s")" < <(site_body "$s"); fi
   done
   [[ $n -gt 0 || -n "$(enabled_sites)" ]] || echo "no site enabled"
+  rotation
   apply
 }
 
@@ -142,8 +187,9 @@ cmd_uninstall() {
   changing
   for s in $(enabled_sites); do remove_file "$(site_conf "$s")"; echo "$s: off"; done
   remove_file "$CONF_DST"
+  remove_file "$ROTATE_DST"
   apply
-  echo "old $LOG_DIR/*.cache.log* files kept"
+  echo "old $LOG_DIR/*.cache.log* files kept (and no longer rotated)"
 }
 
 case "${1:-}" in
