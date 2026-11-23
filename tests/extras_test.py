@@ -384,18 +384,22 @@ def logrotate_scenarios(T, digest_ran):
 
 
 def classify_scenarios(T, digest_ran):
-    T.section("8. Digest: a GET on an ?add-to-cart= link is a crawler, not a page for a person")
+    T.section("8. Digest: crawlers behind a browser user agent are not pages for people")
     if not digest_ran:
         T.skip("needs the digest part above (GNU date)")
         return
     count = lambda out, label: int((re.search(r"%s (\d+)" % label, out) or [0, -1])[1])   # noqa: E731
+
+    def add(minute, uris, ua=UA):
+        """Append one request per URI (a cacheable page PHP rendered) to the live access and cache log."""
+        for log, line in ((SITE + ".access.log", access), (SITE + ".cache.log", lambda d, t, u: cache(d, t, u, "MISS"))):
+            with open(os.path.join(T.log, log), "a") as f:
+                f.write("".join(line(DAY, "15:%02d:00" % (minute + i), u).replace(UA, ua) for i, u in enumerate(uris)))
+
     _, _, miss0, out = T.digest()
     pages0, bots0 = count(out, "pages"), count(out, "bots")
     # browser user agent on all three; only the first two carry the add-to-cart parameter
-    uris = ["/produkt/soap/?add-to-cart=12", "/kategoria/soap/?per_page=6&add-to-cart=12", "/?s=add-to-cart"]
-    for log, line in ((SITE + ".access.log", access), (SITE + ".cache.log", lambda d, t, u: cache(d, t, u, "MISS"))):
-        with open(os.path.join(T.log, log), "a") as f:
-            f.write("".join(line(DAY, "15:0%d:00" % i, u) for i, u in enumerate(uris)))
+    add(0, ["/produkt/soap/?add-to-cart=12", "/kategoria/soap/?per_page=6&add-to-cart=12", "/?s=add-to-cart"])
     _, _, miss, out = T.digest()
     pages, bots = count(out, "pages"), count(out, "bots")
     T.check("the two add-to-cart GETs count as bots", bots == bots0 + 2, "bots %s -> %s\n%s" % (bots0, bots, out[-1500:]))
@@ -403,6 +407,12 @@ def classify_scenarios(T, digest_ran):
             "pages %s -> %s\n%s" % (pages0, pages, out[-1500:]))
     T.check("the cache split leaves them out too (MISS grows by the one page only)", miss == miss0 + 1,
             "MISS %s -> %s\n%s" % (miss0, miss, out[-1500:]))
+    # Meta's second crawler: a browser user agent with no "bot" / "crawl" in it, on an ordinary URL
+    add(10, ["/produkt/soap/"], UA + " (compatible; meta-webindexer/1.1)")
+    _, _, miss2, out = T.digest()
+    T.check("a page fetched by meta-webindexer counts as a bot, in the requests and in the cache split",
+            (count(out, "bots"), count(out, "pages"), miss2) == (bots + 1, pages, miss),
+            "bots %s -> %s, pages %s -> %s, MISS %s -> %s\n%s" % (bots, count(out, "bots"), pages, count(out, "pages"), miss, miss2, out[-1500:]))
 
 
 def main():
