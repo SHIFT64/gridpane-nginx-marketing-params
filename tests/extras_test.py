@@ -185,6 +185,10 @@ class Root:
         n = lambda label: int((re.search(r"(?m)^%s +(\d+)" % label, out) or [0, -1])[1])   # noqa: E731
         return total, n("HIT"), n("MISS"), "exit %d\n%s" % (rc, out)
 
+    def digest_installer(self, *args):
+        return self.sh(["bash", os.path.join(self.extras, "perf-digest/install.sh")] + list(args),
+                       GP_DIGEST_ROOT=self.d, DISCORD_WEBHOOK_URL="")
+
     def snapshot(self):
         out = {}
         for top in ("etc", "var/www"):
@@ -371,7 +375,8 @@ def logrotate_scenarios(T, digest_ran):
     # midnight: the daily rotation is due for every log
     with open(os.path.join(T.log, clog), "a") as f:
         f.write(cache(DAY, "23:58:00", "/late/"))
-    write(state, re.sub(r"(?m) \d+-\d+-\d+-\d+:\d+:\d+$", " 2020-1-1-0:0:0", read(state)))
+    # keep the file's mode: logrotate 3.19 reports an error for a world-readable state file
+    write(state, re.sub(r"(?m) \d+-\d+-\d+-\d+:\d+:\d+$", " 2020-1-1-0:0:0", read(state)), os.stat(state).st_mode & 0o777)
     time.sleep(1.1)                                 # the dated name carries the second of the rotation
     before = T.logs()
     rc, out = rotate()
@@ -405,6 +410,26 @@ def classify_scenarios(T, digest_ran):
             "MISS %s -> %s\n%s" % (miss0, miss, out[-1500:]))
 
 
+def digest_installer_scenarios(T, digest_ran):
+    T.section("9. Digest installer: --test prints the report of today or of a given day, saves and posts nothing")
+    if not digest_ran:
+        T.skip("needs the digest part above (GNU date)")
+        return
+    scripts = ("s64-nginx-perf.sh", "s64-slow-catch.sh")
+    rc, out = T.digest_installer(SITE)
+    T.check("install: exit code 0, both scripts in place",
+            rc == 0 and all(os.access(os.path.join(T.d, "usr/local/bin", f), os.X_OK) for f in scripts), out[-800:])
+    total = T.digest()[0]
+    rc, out = T.digest_installer("--test", DAY.isoformat())
+    T.check("--test %s: exit code 0, the report of that day with all its %s requests" % (DAY.isoformat(), total),
+            rc == 0 and "%s — %s" % (SITE, DAY.isoformat()) in out and "Requests:%s " % total in out, "exit %d\n%s" % (rc, out[-1500:]))
+    rc, out = T.digest_installer("--test")
+    T.check("--test without a day: exit code 0, today's report (these logs have no request of today)",
+            rc == 0 and "%s — empty log" % SITE in out, "exit %d\n%s" % (rc, out[-800:]))
+    hist = os.path.join(T.d, "var/lib/s64-nginx-perf")
+    T.check("neither run writes to the installed history", os.path.isdir(hist) and not os.listdir(hist), " ".join(os.listdir(hist)))
+
+
 def main():
     T = Root()
     try:
@@ -415,6 +440,7 @@ def main():
             digest_ran = digest_scenarios(T)
             logrotate_scenarios(T, digest_ran)
             classify_scenarios(T, digest_ran)
+            digest_installer_scenarios(T, digest_ran)
         except (OSError, subprocess.SubprocessError, AssertionError) as e:   # a broken script can leave
             T.check("test run completed", False, "%s: %s" % (e.__class__.__name__, e))   # files missing
     except SetupError as e:
