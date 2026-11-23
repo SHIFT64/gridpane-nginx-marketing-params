@@ -89,7 +89,8 @@ cmd_test() { # dry run on a copy of the history, nothing posted, history untouch
   trap 'rm -rf "$tmp"' RETURN
   [[ -d "$HIST" ]] && cp -a "$HIST/." "$tmp/"
   [[ -x "$BIN/s64-nginx-perf.sh" ]] || die "not installed: run $0 site.com first"
-  S64_DRY_RUN=1 S64_HIST_DIR="$tmp" S64_CATCH="$BIN/s64-slow-catch.sh" ${day:+S64_DATE=$day} "$BIN/s64-nginx-perf.sh"
+  # through env: the shell takes a VAR=value that comes out of an expansion for the command name
+  env S64_DRY_RUN=1 S64_HIST_DIR="$tmp" S64_CATCH="$BIN/s64-slow-catch.sh" ${day:+"S64_DATE=$day"} "$BIN/s64-nginx-perf.sh"
 }
 
 cmd_status() {
