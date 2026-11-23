@@ -378,7 +378,7 @@ What the report shows:
 
 | row | what it is |
 |---|---|
-| `PAGES` | GET pages for people: no static files, `/wp-json/`, wp-admin / wp-login / ajax, bots (incl. link previews like `facebookexternalhit`, and every GET on an `?add-to-cart=` link: people add to cart by AJAX or POST, crawlers with a browser user agent follow the link) or uptime monitors. Times run until the last byte is sent, so slow clients and heavy HTML count. |
+| `PAGES` | GET pages for people: no static files, `/wp-json/`, wp-admin / wp-login / ajax, bots (incl. link previews like `facebookexternalhit`, Meta's `meta-webindexer`, and every GET on an `?add-to-cart=` link: people add to cart by AJAX or POST, crawlers with a browser user agent follow the link) or uptime monitors. Times run until the last byte is sent, so slow clients and heavy HTML count. |
 | `HIT` / `MISS` / `BYPASS` | page-cache split of `PAGES`. With the [exact cache log](#exact-cache-log-optional-add-on) enabled for the site (`Redis exact`), it is srcache's own verdict: `MISS` = cacheable, generated and stored. `BYPASS` = never cached, split into `cookie` (logged-in / cart session), `query`, `cart` (Do-Not-Cache page), `uri`. Without that log it is inferred from GridPane's log, and cookie bypasses then count as MISS. FastCGI sites use `$upstream_cache_status`. |
 | `non200` | 404 pages and redirects rendered by PHP (never cached) |
 | `bots` / `API` / `admin` | the traffic that is not pages |
