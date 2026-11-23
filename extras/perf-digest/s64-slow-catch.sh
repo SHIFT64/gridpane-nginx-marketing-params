@@ -54,7 +54,7 @@ else
     LOG="/var/log/nginx/${SITE}.access.log"
     [ -f "$LOG" ] || { echo "no access log: $LOG" >&2; exit 1; }
     : > "$tmp/lines"
-    for f in "$LOG" "$LOG".*; do
+    for f in "$LOG" "$LOG".* "$LOG"-*; do   # live + rotated: numbered (.N.gz) or dated (-YYYYMMDD-<epoch>.gz)
         [ -e "$f" ] || continue
         case "$f" in
             *.gz) zgrep -hF "[$TAG" "$f" >> "$tmp/lines" 2>/dev/null || true ;;

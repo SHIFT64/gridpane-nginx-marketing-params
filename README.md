@@ -36,7 +36,7 @@ To update later: `git pull && ./test.sh && ./install.sh` (your list is kept), or
 
 Versions follow [semantic versioning](https://semver.org): one version for the whole repository, the WooCommerce add-on's `Version:` header included. While it is `0.x`, a minor bump (`0.2.0`) may change behaviour; patch releases (`0.1.1`) only fix things or change docs.
 
-**Update check.** Every install command (`./install.sh [sites]`, `--full`, `--woo-purge`) first asks GitHub for the newest [release](https://github.com/SHIFT64/gridpane-nginx-marketing-params/releases) tag, `vX.Y.Z` (`git ls-remote`: refs only, nothing is downloaded). Commits on `main` that are not released yet never count as an update. If the newest release is not in this checkout yet, the script stops before changing anything, fast-forwards to that release, prints the new commits, runs the tests (`./test.sh`: sandbox + installer) and, only if they pass, starts again with the same arguments. It does not update when the checkout has local changes (it stops and says so), when the checkout already contains the release (e.g. you pulled `main`), or when GitHub is unreachable (it warns and continues with the local copy). `--status`, `--disable`, `--apply-list` and `--uninstall` never check. Skip the check with `GP_MKT_NO_UPDATE_CHECK=1 ./install.sh …`.
+**Update check.** Every install command (`./install.sh [sites]`, `--full`, `--woo-purge`) first asks GitHub for the newest [release](https://github.com/SHIFT64/gridpane-nginx-marketing-params/releases) tag, `vX.Y.Z` (`git ls-remote`: refs only, nothing is downloaded). Commits on `main` that are not released yet never count as an update. If the newest release is not in this checkout yet, the script stops before changing anything, fast-forwards to that release, prints the new commits, runs the tests (`./test.sh`: sandbox + installer + extras) and, only if they pass, starts again with the same arguments. It does not update when the checkout has local changes (it stops and says so), when the checkout already contains the release (e.g. you pulled `main`), or when GitHub is unreachable (it warns and continues with the local copy). `--status`, `--disable`, `--apply-list` and `--uninstall` never check. Skip the check with `GP_MKT_NO_UPDATE_CHECK=1 ./install.sh …`.
 
 The script:
 
@@ -88,7 +88,7 @@ A plain `./install.sh yourshop.com` run from a terminal asks about the add-on fo
 ./test.sh
 ```
 
-Runs the sandbox test and the installer test below (`./test.sh --cache all` = sandbox only, `./test.sh install` = installer only).
+Runs the sandbox test, the installer test and the extras test below (`./test.sh --cache all` = sandbox only, `./test.sh install` = installer only, `./test.sh extras` = extras only).
 
 **Sandbox.** Starts a throw-away nginx on a random `127.0.0.1` port. It uses the server's own binary, **GridPane's real templates from this server** (`/etc/nginx/common/wpfc.conf` and `/etc/nginx/common/wp-redis.conf`), the files from this repo, and a fake PHP backend (`tests/fake_php.py`). For Redis it also starts a throw-away `redis-server` on a unix socket inside its temp directory (one database per test vhost, as GridPane does). It runs 129 FastCGI and 144 Redis checks (144 more for GridPane's legacy Redis template, see below) and then cleans up. Covered, for both cache types:
 - cache sharing and no poisoning
@@ -106,6 +106,8 @@ Runs the sandbox test and the installer test below (`./test.sh --cache all` = sa
 **Installer.** `./test.sh install` copies this repo into a throw-away root under `/tmp` (with `install.sh`'s `/etc/nginx`, `/var/www` and `/root` moved into it), renders GridPane's real templates from this server for a few fake sites, and runs `install.sh` with the server's real `nginx -t` on that copy (`systemctl` only records the call; nginx's own messages go to the throw-away root, not to the server's error log). 133 checks: install and re-install (byte-identical); FastCGI, Redis, legacy-Redis and no-cache sites; site names containing "lua"; fourteen kinds of template or site file the installer must refuse (ten on Redis, four on FastCGI), including GridPane's add-on-domain overlay for both cache types (skipped, old switch removed, nothing else touched); a site file added later (reported as unsafe); a trailing `/` and an invalid site argument; cache-type changes in both directions and to no cache; a clone (reported, rewritten by the next install run); a staging push that leaves the other cache type's flag behind; a flag/switch pair of two sites; an `nginx -t` failure (every file restored, no reload); `--apply-list` (broken and valid); `--disable`; `--uninstall`; and `--status` / `--disable` / update / `--uninstall` with an engine and site files from before the Redis support. Needs root; never touches the live config. Without GridPane's Redis template or the Redis nginx modules it is skipped with a notice.
 
 `./test.sh --cache fcgi`, `--cache redis` or `--cache redis-legacy` runs one cache type only. When GridPane keeps its legacy Redis template next to the current one (`wp-redis-legacy.conf`), the default run tests it too (one database and the `nginx-cache:` prefix for every site, redirects stored as well). On a server without `redis-server` or the Redis nginx modules, the Redis part is skipped with a notice.
+
+**Extras.** `./test.sh extras` covers the two optional add-ons whose files depend on GridPane's log rotation: the [exact cache log](#exact-cache-log-optional-add-on) and the [perf digest](#nightly-perf-digest-to-discord-optional-add-on). It copies `extras/` into a throw-away root under `/tmp` (with `/etc/nginx`, `/etc/logrotate.d`, `/var/www`, `/var/log/nginx` and nginx's pid file moved into it) and writes its own log lines there: synthetic requests, not real traffic. 37 checks: the cache-log installer next to GridPane's logrotate v1 file (own rotation file installed, same settings as GridPane's access-log stanza, no overlapping pattern, GridPane's file not edited), re-install (byte-identical), a changed or lost rotation file, an older catch-all pattern that already matches the cache logs (rotation left to it), `--disable` and `--uninstall`; the digest and `s64-slow-catch.sh` on a day spread over the live log and rotated files of both naming schemes (`<log>.N.gz` and `<log>-YYYYMMDD-<epoch>.gz`); and the server's real `logrotate` binary rotating those logs with the installed file next to GridPane's v1 stanzas (a backlog over 10 MB, then the daily rotation), followed by the digest on the result. It uses its own logrotate state file, signals no nginx and posts nothing to Discord. The digest part needs GNU `date`, the logrotate part the `logrotate` binary and root; where they are missing (a workstation), those parts are skipped with a notice (23 checks remain).
 
 **It never touches the live nginx or the sites.** Run it after every GridPane update: if GridPane changes its template, the test catches it.
 
@@ -317,10 +319,19 @@ GridPane's access log (`we_log`) has `$upstream_cache_status`, which the Redis p
 ./extras/cache-log/install.sh site1.com site2.com   # enable (Redis page-cache sites only, others are skipped with the reason)
 ./extras/cache-log/install.sh --status              # what is installed, is it current, nginx -t
 ./extras/cache-log/install.sh --disable site1.com   # stop logging for a site (old log files are kept)
-./extras/cache-log/install.sh --uninstall           # every site off + the log_format removed
+./extras/cache-log/install.sh --uninstall           # every site off + the log_format and the rotation removed
 ```
 
-It writes `/etc/nginx/conf.d/s64-cachelog.conf` (one `log_format s64cache`) and `/var/www/<site>/nginx/s64-cachelog-main-context.conf` (one `access_log` line, next to GridPane's own `access_log` in the `server` block). No GridPane-managed file is edited. Every run does `nginx -t` first. If it fails, the previous files are put back and nginx is not reloaded. Re-running it is safe: files that are already current are left alone. GridPane's logrotate (`/var/log/nginx/*log`) rotates `/var/log/nginx/<site>.cache.log` together with the main log.
+It writes `/etc/nginx/conf.d/s64-cachelog.conf` (one `log_format s64cache`), `/var/www/<site>/nginx/s64-cachelog-main-context.conf` (one `access_log` line, next to GridPane's own `access_log` in the `server` block) and `/etc/logrotate.d/s64-cachelog` (rotation, below). No GridPane-managed file is edited. Every run does `nginx -t` first. If it fails, the previous files are put back and nginx is not reloaded. Re-running it is safe: files that are already current are left alone.
+
+**Rotation.** Until November 2026 GridPane's `/etc/logrotate.d/nginx` had one pattern for every nginx log (`/var/log/nginx/*log`), which rotated `<site>.cache.log` too. Its current file ("v1", managed by GridPane) only matches `*.access.log`, `*.error.log`, `6g.log` and `7g.log`, so nothing rotated the cache log any more (seen on a live shop: 75 MB after 16 days). The installer now brings its own file, `/etc/logrotate.d/s64-cachelog`, for `/var/log/nginx/*.cache.log` only:
+
+- **Same settings as GridPane's access-log stanza.** Rotated daily, or by the hourly logrotate run once a log is over 10 MB; compressed; kept 30 days; nginx reopens its logs (`USR1`) afterwards. Rotated files get the same names as GridPane's access logs: `<site>.cache.log-YYYYMMDD-<epoch>.gz`. The [perf digest](#nightly-perf-digest-to-discord-optional-add-on) reads them.
+- **No overlap.** logrotate refuses a log that two stanzas match (`duplicate log entry`, exit code 1 on every run). The pattern matches none of GridPane's logs, and GridPane's patterns do not match `*.cache.log`. On a server where another logrotate file still matches the cache logs (GridPane's older catch-all), the installer adds no file of its own and leaves rotation to that one.
+- **`--status`** shows which file rotates the logs. It reports a problem when none does (for example after GridPane replaced its old file with v1) and when two do. Re-run the installer for any site to fix either. Only the logrotate file changes then, so nginx is not reloaded.
+- **`--disable`** keeps the rotation file (other sites may still log). **`--uninstall`** removes it. The old logs stay and are no longer rotated or removed.
+
+**A backlog from before this fix needs no extra step.** Re-run `./extras/cache-log/install.sh <site>` on the server. The installer does not touch the log itself: it neither truncates nor forces a rotation. logrotate's next hourly run finds the log over 10 MB and rotates all of it into one compressed file, which is removed 30 days later like every other rotated log. Nothing is lost for the digest, as long as its scripts are current too (`./extras/perf-digest/install.sh`): older ones cannot read the dated file names and would report that day's cache split only from the rotation onwards.
 
 One line per request (static files and anything else with `access_log off` are not logged):
 
@@ -367,12 +378,14 @@ What the report shows:
 
 | row | what it is |
 |---|---|
-| `PAGES` | GET pages for people: no static files, `/wp-json/`, wp-admin / wp-login / ajax, bots (incl. link previews like `facebookexternalhit`) or uptime monitors. Times run until the last byte is sent, so slow clients and heavy HTML count. |
+| `PAGES` | GET pages for people: no static files, `/wp-json/`, wp-admin / wp-login / ajax, bots (incl. link previews like `facebookexternalhit`, and every GET on an `?add-to-cart=` link: people add to cart by AJAX or POST, crawlers with a browser user agent follow the link) or uptime monitors. Times run until the last byte is sent, so slow clients and heavy HTML count. |
 | `HIT` / `MISS` / `BYPASS` | page-cache split of `PAGES`. With the [exact cache log](#exact-cache-log-optional-add-on) enabled for the site (`Redis exact`), it is srcache's own verdict: `MISS` = cacheable, generated and stored. `BYPASS` = never cached, split into `cookie` (logged-in / cart session), `query`, `cart` (Do-Not-Cache page), `uri`. Without that log it is inferred from GridPane's log, and cookie bypasses then count as MISS. FastCGI sites use `$upstream_cache_status`. |
 | `non200` | 404 pages and redirects rendered by PHP (never cached) |
 | `bots` / `API` / `admin` | the traffic that is not pages |
 | `PHP` (backend) | every request that ran PHP, any kind incl. POST, with pure PHP time (no client download); overlaps the rows above and drives the PHP p95 alert |
 | PHP time spent | PHP seconds per kind of traffic (pages, 404s, API, admin, bots, monitors, POST): shows what the PHP workers spent the day on |
+
+**Rotated logs.** GridPane's logrotate runs every hour and rotates an access log once it is over 10 MB, so a day's requests can be spread over the live log and several rotated files. The digest (and `s64-slow-catch.sh`) reads the live log and every rotated file, under both names GridPane has used: numbered (`<site>.access.log.N.gz`) and, since its logrotate v1 of November 2026, dated (`<site>.access.log-YYYYMMDD-<epoch>.gz`). The same goes for the cache log. A rotation in the middle of the day, or one just before 23:59, loses no requests.
 
 `S64_DRY_RUN=1`, `S64_DATE=YYYY-MM-DD` and `S64_HIST_DIR=<dir>` also work on the script directly (`--test` uses them). Needs `python3` and `curl`.
 
@@ -413,14 +426,14 @@ GridPane may change its feature, so treat the Lua column as a snapshot of that v
 
 ```
 install.sh                      install / enable / disable / apply list / status / uninstall / add-on
-test.sh                         tests: sandbox + installer (default), `install`, `live <site> [/path/] [--fresh]` or `woo <site>`
+test.sh                         tests: sandbox + installer + extras (default), `install`, `extras`, `live <site> [/path/] [--fresh]` or `woo <site>`
 build-engine.py                 engine.conf generator
 server/marketing-params/        → /etc/nginx/marketing-params/  (php-context.conf, php-context-fcgi.conf, php-context-redis.conf, params.list)
 server/stubs/                   → /etc/nginx/conf.d/marketing-params.conf
 site/                           → /var/www/<site>/nginx/  (switch + flag; FastCGI or Redis variant)
 extras/woo-purge/               → /var/www/<site>/htdocs/wp-content/mu-plugins/gp-woo-purge.php
-extras/cache-log/               optional exact Redis cache log: install.sh, s64-cachelog.conf → /etc/nginx/conf.d/ (+ one file per site)
+extras/cache-log/               optional exact Redis cache log: install.sh, s64-cachelog.conf → /etc/nginx/conf.d/ (+ one file per site), s64-cachelog.logrotate → /etc/logrotate.d/s64-cachelog
 extras/perf-digest/             optional nightly Discord digest: install.sh, s64-nginx-perf.sh + s64-slow-catch.sh → /usr/local/bin/
-tests/                          sandbox_test.py, install_test.py, live_test.py, fake_php.py (PHP-FPM stand-in), woo_purge_test.php
+tests/                          sandbox_test.py, install_test.py, extras_test.py, live_test.py, fake_php.py (PHP-FPM stand-in), woo_purge_test.php
 docs/                           gridpane-lua-query-param-cache.md (GridPane's Lua feature: how it works, findings)
 ```

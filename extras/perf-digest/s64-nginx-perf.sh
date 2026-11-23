@@ -122,10 +122,12 @@ for site in $SITES; do
     fi
 
     tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-    # GridPane logrotate runs hourly with maxsize 1M, so today's traffic is
-    # spread over the live log AND rotated .gz files — read them all.
+    # GridPane's logrotate runs hourly and rotates a log over its maxsize, so
+    # today's traffic is spread over the live log AND rotated files — read
+    # them all, under both names GridPane has used: numbered (<log>.N.gz) and,
+    # since its logrotate v1 (2026-11), dated (<log>-YYYYMMDD-<epoch>.gz).
     : > "$tmp/lines"
-    for f in "$LOG" "$LOG".*; do
+    for f in "$LOG" "$LOG".* "$LOG"-*; do
         [ -e "$f" ] || continue
         case "$f" in
             *.gz) zgrep -hF "[$TODAY_TAG" "$f" >> "$tmp/lines" 2>/dev/null || true ;;
@@ -150,7 +152,11 @@ for site in $SITES; do
     #   BOT   = crawlers, link previews (facebookexternalhit fetches ~450
     #           pages a day and downloads slowly), scripts, empty UA,
     #           price-comparison scrapers with a browser UA (GeedoShopProductFinder
-    #           made a false red day on merida, 2026-11-02)
+    #           made a false red day on merida, 2026-11-02), and every GET
+    #           ...?add-to-cart= : shops add to cart by AJAX or POST, so a GET
+    #           on that link is a crawler following hrefs behind a browser UA
+    #           (~2,200 Alibaba Cloud IPs doubled the pages p50 on merida,
+    #           2026-11-19)
     # Page-cache hits stay in PAGE — a 0 ms cached page is genuine user
     # experience. All of them still count under PHP when PHP ran.
     MON='uptime-kuma|uptimerobot|betteruptime|better uptime|pingdom|statuscake|site24x7'
@@ -162,7 +168,7 @@ for site in $SITES; do
         if (ua ~ mon) return "MON"
         if (u ~ /^\/wp-json(\/|$)/ || u ~ /[?&]rest_route=/) return "API"
         if (u ~ /^\/(wp-admin\/|wp-login\.php|xmlrpc\.php|wp-cron\.php)/ || u ~ /[?&]wc-ajax=/) return "ADMIN"
-        if (ua == "" || ua == "-" || ua ~ bot) return "BOT"
+        if (ua == "" || ua == "-" || ua ~ bot || u ~ /[?&]add-to-cart=/) return "BOT"
         return "PAGE"
     }'
     # pages -> raw PAGE lines; kinds -> "KIND status php_time request_time" for
@@ -211,7 +217,8 @@ for site in $SITES; do
     grep -Eq '^[[:space:]]*include .*-wpfc\.conf' "$vhost" 2>/dev/null && cache_mode="FastCGI"
     : > "$tmp/clines"
     if [ "$cache_mode" = "Redis" ]; then
-        for f in "/var/log/nginx/${site}.cache.log" "/var/log/nginx/${site}.cache.log".*; do
+        CLOG="/var/log/nginx/${site}.cache.log"
+        for f in "$CLOG" "$CLOG".* "$CLOG"-*; do   # live + rotated, numbered or dated (as above)
             [ -e "$f" ] || continue
             zgrep -h "^${TODAY}T" "$f" >> "$tmp/clines" 2>/dev/null || true
         done
